@@ -1,0 +1,15 @@
+# Unityの一時ファイル
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Builds]/
+[Logs]/
+[UserSettings]/
+
+# OS固有のファイル
+.DS_Store
+Thumbs.db
+
+# 個人設定ファイル（もしフォルダ内に生成される場合）
+*.user
+*.userprefs

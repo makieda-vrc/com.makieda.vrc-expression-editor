@@ -1,0 +1,19 @@
+{
+  "name": "com.makieda.vrc-expression-editor",
+  "version": "1.0.0",
+  "displayName": "VRC Expression Editor",
+  "description": "VRChat向けアバターの1F表情アニメーションを作成・編集するための軽量・高速なツールです。",
+  "unity": "2022.3",
+  "author": {
+    "name": "Makieda",
+    "email": "makiedavr@gmail.com",
+    "url": "https://x.com/makieda_vrc"
+  },
+  "category": "VRChat/Editor",
+  "keywords": [
+    "vrchat",
+    "editor",
+    "expression",
+    "blendshape"
+  ]
+}
