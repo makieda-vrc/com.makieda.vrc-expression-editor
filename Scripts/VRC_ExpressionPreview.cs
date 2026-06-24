@@ -33,6 +33,9 @@ public class VRC_ExpressionPreview : EditorWindow
     private Quaternion lastLightRot;
     private Color lastLightColor;
     private float lastLightIntensity;
+    private LightShadows lastLightShadows;
+    private float lastLightShadowStrength;
+    private float lastLightShadowBias;
 
     private bool isAvatarChanged = true;
     private bool isDirty = true;
@@ -98,6 +101,9 @@ public class VRC_ExpressionPreview : EditorWindow
         if (cachedSceneLight.transform.rotation != lastLightRot) { lightChanged = true; lastLightRot = cachedSceneLight.transform.rotation; }
         if (cachedSceneLight.color != lastLightColor) { lightChanged = true; lastLightColor = cachedSceneLight.color; }
         if (cachedSceneLight.intensity != lastLightIntensity) { lightChanged = true; lastLightIntensity = cachedSceneLight.intensity; }
+        if (cachedSceneLight.shadows != lastLightShadows) { lightChanged = true; lastLightShadows = cachedSceneLight.shadows; }
+        if (cachedSceneLight.shadowStrength != lastLightShadowStrength) { lightChanged = true; lastLightShadowStrength = cachedSceneLight.shadowStrength; }
+        if (cachedSceneLight.shadowBias != lastLightShadowBias) { lightChanged = true; lastLightShadowBias = cachedSceneLight.shadowBias; }
 
         if (lightChanged) Repaint();
     }
@@ -185,7 +191,6 @@ public class VRC_ExpressionPreview : EditorWindow
 
     private void InitializeGUIStylesIfNeeded()
     {
-        // 修正：確実なnullチェック（optExpandTrue）を入れてGUIエラーを防ぐ
         if (resizeIconContent == null || optExpandTrue == null)
         {
             resizeIconContent = EditorGUIUtility.IconContent("d_ViewToolZoom");
@@ -209,7 +214,6 @@ public class VRC_ExpressionPreview : EditorWindow
     {
         InitializeGUIStylesIfNeeded();
 
-        // 修正：再生モード中は重い処理を止め、中央にメッセージのみを表示する
         if (EditorApplication.isPlayingOrWillChangePlaymode)
         {
             GUILayout.FlexibleSpace();
@@ -299,6 +303,7 @@ public class VRC_ExpressionPreview : EditorWindow
 
             SyncTransformsAndActive(editor.rootObject.transform, previewDummy.transform, true);
             StripAllUnwantedComponents(previewDummy);
+
             previewDummy.transform.position = Vector3.zero;
             previewDummy.transform.rotation = Quaternion.identity;
 
@@ -397,6 +402,12 @@ public class VRC_ExpressionPreview : EditorWindow
             previewUtility.lights[0].color = sceneLight.color;
             previewUtility.lights[0].intensity = sceneLight.intensity;
             previewUtility.lights[0].transform.rotation = sceneLight.transform.rotation;
+
+            previewUtility.lights[0].shadows = sceneLight.shadows;
+            previewUtility.lights[0].shadowStrength = sceneLight.shadowStrength;
+            previewUtility.lights[0].shadowBias = sceneLight.shadowBias;
+            previewUtility.lights[0].shadowNormalBias = sceneLight.shadowNormalBias;
+            previewUtility.lights[0].shadowNearPlane = sceneLight.shadowNearPlane;
         }
         else
         {
@@ -404,6 +415,7 @@ public class VRC_ExpressionPreview : EditorWindow
             previewUtility.lights[0].color = Color.white;
             previewUtility.lights[0].intensity = 1.0f;
             previewUtility.lights[0].transform.rotation = Quaternion.Euler(30f, 135f, 0f);
+            previewUtility.lights[0].shadows = LightShadows.None;
         }
         previewUtility.lights[1].color = cachedAmbientColor;
         previewUtility.lights[1].intensity = 1.0f;
