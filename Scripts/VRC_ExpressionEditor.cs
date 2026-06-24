@@ -99,6 +99,7 @@ public class VRC_ExpressionEditor : EditorWindow
     private GUIContent jumpUpIconContent;
     private GUIContent cachedSortTooltipContent;
     private GUIContent gearIconContent;
+    private GUIStyle centerLockStyle;
 
     [System.NonSerialized] public List<string> detailFilterWords = new List<string>();
     [System.NonSerialized] public List<bool> detailFilterActives = new List<bool>();
@@ -106,10 +107,7 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private float filterPanelWidth = 150f;
     private bool isResizingFilter = false;
-
     [System.NonSerialized] public bool isClosing = false;
-
-    [System.NonSerialized] private bool isPendingAutoLoad = false;
 
     private GUILayoutOption optW15, optW18, optW20, optW24, optW26, optW28, optW30, optW40, optWMin100, optWMax200, optWMax165;
     private GUILayoutOption optH1, optH18, optH22, optH24, optH30, optExpandTrue;
@@ -140,42 +138,65 @@ public class VRC_ExpressionEditor : EditorWindow
     {
         Instance = this;
         isClosing = false;
+
         Selection.selectionChanged += OnSelectionChanged;
         EditorApplication.update += OnEditorUpdate;
+        EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+        UnityEditor.SceneManagement.EditorSceneManager.sceneOpened += OnSceneOpened;
+
         LoadSettings();
-
         this.minSize = new Vector2(350f, 400f);
-
         if (settingsAsset != null)
         {
             isFilterWindowOpen = settingsAsset.isFilterWindowOpen;
             filterPanelWidth = settingsAsset.filterPanelWidth;
             if (filterPanelWidth < 100f) filterPanelWidth = 150f;
-
-            if (isFilterWindowOpen)
-            {
-                this.minSize = new Vector2(350f + filterPanelWidth, 400f);
-            }
-            else
-            {
-                this.minSize = new Vector2(350f, 400f);
-            }
+            this.minSize = new Vector2(isFilterWindowOpen ? 350f + filterPanelWidth : 350f, 400f);
         }
 
-        isPendingAutoLoad = true;
+        EditorApplication.delayCall += () =>
+        {
+            if (this == null) return;
+            AutoSelectAvatarOnLoad();
+            Repaint();
+        };
+    }
+
+    private void OnDisable()
+    {
+        isClosing = true;
+        Selection.selectionChanged -= OnSelectionChanged;
+        EditorApplication.update -= OnEditorUpdate;
+        EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+        UnityEditor.SceneManagement.EditorSceneManager.sceneOpened -= OnSceneOpened;
+
+        SaveCurrentSettings();
+    }
+
+    private void OnPlayModeStateChanged(PlayModeStateChange state)
+    {
+        if (state == PlayModeStateChange.EnteredEditMode)
+        {
+            AutoSelectAvatarOnLoad();
+            Repaint();
+            if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.Repaint();
+        }
+    }
+
+    private void OnSceneOpened(UnityEngine.SceneManagement.Scene scene, UnityEditor.SceneManagement.OpenSceneMode mode)
+    {
+        AutoSelectAvatarOnLoad();
+        Repaint();
     }
 
     private void AutoSelectAvatarOnLoad()
     {
+        if (EditorApplication.isPlayingOrWillChangePlaymode) return;
+
         if (Selection.activeGameObject != null)
         {
             var animator = Selection.activeGameObject.GetComponentInParent<Animator>();
-            if (animator != null)
-            {
-                rootObject = animator.gameObject;
-                RefreshData(true);
-                return;
-            }
+            if (animator != null) { rootObject = animator.gameObject; RefreshData(true); return; }
         }
 
         if (settingsAsset != null && !string.IsNullOrEmpty(settingsAsset.lastAvatarName))
@@ -184,56 +205,21 @@ public class VRC_ExpressionEditor : EditorWindow
             if (foundObj != null)
             {
                 var animator = foundObj.GetComponentInParent<Animator>();
-                if (animator != null)
-                {
-                    rootObject = animator.gameObject;
-                    RefreshData(true);
-                }
+                if (animator != null) { rootObject = animator.gameObject; RefreshData(true); }
             }
         }
     }
 
-    private void OnDisable()
-    {
-        isClosing = true;
-        Selection.selectionChanged -= OnSelectionChanged;
-        EditorApplication.update -= OnEditorUpdate;
-
-        SaveCurrentSettings();
-    }
-
     private void OnEditorUpdate()
     {
-        // ▼追加：起動時のデータ遅延ロード処理（1度だけ実行）
-        if (isPendingAutoLoad)
-        {
-            // Unityの起動時処理（コンパイルや裏側のアセット読み込み）が終わるまで待つ
-            if (EditorApplication.isCompiling || EditorApplication.isUpdating) return;
+        if (EditorApplication.isPlayingOrWillChangePlaymode) return;
 
-            // 準備が整ったらフラグを折り、次からこのチェック処理をスルーさせる（負荷ゼロ）
-            isPendingAutoLoad = false;
-
-            // 安全なフレームのタイミングを見計らって1回だけ実行
-            EditorApplication.delayCall += () =>
-            {
-                if (this == null) return;
-                AutoSelectAvatarOnLoad();
-                Repaint();
-            };
-            return;
-        }
-        if (GUIUtility.hotControl == 0 && dirtyShapeKeys.Count > 0)
-        {
-            CommitDirtyKeysDeferred();
-        }
+        if (GUIUtility.hotControl == 0 && dirtyShapeKeys.Count > 0) CommitDirtyKeysDeferred();
 
         double timeSinceStartup = EditorApplication.timeSinceStartup;
         if (timeSinceStartup - lastPreviewCheckTime < 0.1) return;
         lastPreviewCheckTime = timeSinceStartup;
-        if (VRC_ExpressionPreview.Instance == null)
-        {
-            this.Close();
-        }
+        if (VRC_ExpressionPreview.Instance == null) this.Close();
     }
 
     private void CommitDirtyKeysDeferred()
@@ -280,26 +266,20 @@ public class VRC_ExpressionEditor : EditorWindow
 
     public void SaveCurrentSettings()
     {
-        if (settingsAsset == null) return;
+        if (settingsAsset == null || EditorApplication.isPlayingOrWillChangePlaymode || EditorApplication.isCompiling) return;
 
-        if (rootObject != null)
-        {
-            settingsAsset.lastAvatarName = rootObject.name;
-        }
+        if (rootObject != null) settingsAsset.lastAvatarName = rootObject.name;
 
         string id = GetAvatarID(); if (string.IsNullOrEmpty(id)) return;
         string clipPath = (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0) ? AssetDatabase.GetAssetPath(availableClips[selectedClipIndex]) : "";
-        string smrName = (availableSmrs.Count > selectedClipIndex && selectedClipIndex >= 0) ? availableSmrs[selectedSmrIndex].name : "";
+        string smrName = (availableSmrs.Count > selectedSmrIndex && selectedSmrIndex >= 0) ? availableSmrs[selectedSmrIndex].name : "";
         List<string> manualClipPaths = manuallyCreatedClips.Where(c => c != null).Select(AssetDatabase.GetAssetPath).Where(p => !string.IsNullOrEmpty(p)).ToList();
 
         string refClipPath = referenceClip != null ? AssetDatabase.GetAssetPath(referenceClip) : "";
         List<string> favShapes = favoriteShapes.ToList();
 
-        if (settingsAsset != null)
-        {
-            settingsAsset.isFilterWindowOpen = isFilterWindowOpen;
-            settingsAsset.filterPanelWidth = filterPanelWidth;
-        }
+        settingsAsset.isFilterWindowOpen = isFilterWindowOpen;
+        settingsAsset.filterPanelWidth = filterPanelWidth;
 
         settingsAsset.SaveEntry(id, clipPath, smrName, selectedLayers, manualClipPaths, refClipPath, favShapes, autoLinkShapeKeys, isMirroringEnabled, detailFilterWords, detailFilterActives);
         EditorUtility.SetDirty(settingsAsset);
@@ -307,6 +287,7 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void OnSelectionChanged()
     {
+        if (EditorApplication.isPlayingOrWillChangePlaymode) return;
         if (Selection.activeGameObject != null)
         {
             var animator = Selection.activeGameObject.GetComponentInParent<Animator>();
@@ -340,7 +321,7 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void InitializeGUIStylesIfNeeded()
     {
-        if (cachedBoldLabelStyle == null)
+        if (cachedBoldLabelStyle == null || optExpandTrue == null)
         {
             cachedBoldLabelStyle = new GUIStyle(EditorStyles.label) { fontStyle = FontStyle.Bold };
             cachedNormalLabelStyle = new GUIStyle(EditorStyles.label);
@@ -348,45 +329,30 @@ public class VRC_ExpressionEditor : EditorWindow
             cachedPlaceholderStyle = new GUIStyle(EditorStyles.label);
             cachedPlaceholderStyle.normal.textColor = Color.gray;
 
+            centerLockStyle = new GUIStyle(EditorStyles.boldLabel);
+            centerLockStyle.alignment = TextAnchor.MiddleCenter;
+            centerLockStyle.fontSize = 14;
+            centerLockStyle.wordWrap = true;
+
             cachedSortTooltipContent = new GUIContent("", "シェイプキーの表示順を変更します");
             cachedFavOnContent = new GUIContent("★", "ピン留め解除");
             cachedFavOffContent = new GUIContent("☆", "ピン留め");
-            warnIconContent = EditorGUIUtility.IconContent("console.warnIcon");
-            warnIconContent.tooltip = "警告: 複数フレームを持っています。\nスライダーを動かすと1F目に上書きされます！";
-            trashIconContent = EditorGUIUtility.IconContent("TreeEditor.Trash");
-            trashIconContent.tooltip = "このアニメを編集リストから除外する";
-            createIconContent = EditorGUIUtility.IconContent("Toolbar Plus");
-            createIconContent.tooltip = "新規表情アニメを作成";
-            openIconContent = EditorGUIUtility.IconContent("FolderOpened Icon");
-            openIconContent.tooltip = "既存のアニメーションを開く";
-            linkIconContent = EditorGUIUtility.IconContent("Linked");
-            linkIconContent.tooltip = "別メッシュ同名シェイプ連動\nONにすると別メッシュの同名シェイプも動かします";
-            mirrorIconContent = new GUIContent("M", "左右対称（ミラー）モード\nONにするとLとRが連動します");
-            copypasteIconContent = EditorGUIUtility.IconContent("Clipboard");
-            copypasteIconContent.tooltip = "コピペモード\nONにすると左端に選択チェックが表示されます";
-            jumpDownIconContent = new GUIContent("▼", "一覧の一番下へジャンプします");
-            jumpUpIconContent = new GUIContent("▲", "一覧の一番上へジャンプします");
+            warnIconContent = EditorGUIUtility.IconContent("console.warnIcon"); warnIconContent.tooltip = "警告: 複数フレームを持っています。\nスライダーを動かすと1F目に上書きされます！";
+            trashIconContent = EditorGUIUtility.IconContent("TreeEditor.Trash"); trashIconContent.tooltip = "このアニメを編集リストから除外する";
+            createIconContent = EditorGUIUtility.IconContent("Toolbar Plus"); createIconContent.tooltip = "新規表情アニメを作成";
+            openIconContent = EditorGUIUtility.IconContent("FolderOpened Icon"); openIconContent.tooltip = "既存のアニメーションを開く";
+            linkIconContent = EditorGUIUtility.IconContent("Linked"); linkIconContent.tooltip = "別メッシュ同名シェイプ連動";
+            mirrorIconContent = new GUIContent("M", "左右対称（ミラー）モード");
+            copypasteIconContent = EditorGUIUtility.IconContent("Clipboard"); copypasteIconContent.tooltip = "コピペモード";
+            jumpDownIconContent = new GUIContent("▼", "一番下へジャンプ");
+            jumpUpIconContent = new GUIContent("▲", "一番上へジャンプ");
+            gearIconContent = EditorGUIUtility.IconContent("d_SettingsIcon"); gearIconContent.tooltip = "詳細フィルター（OR絞り込み）の開閉";
 
-            gearIconContent = EditorGUIUtility.IconContent("d_SettingsIcon");
-            gearIconContent.tooltip = "詳細フィルター（OR絞り込み）の開閉";
+            optW15 = GUILayout.Width(15); optW18 = GUILayout.Width(18); optW20 = GUILayout.Width(20); optW24 = GUILayout.Width(24);
+            optW26 = GUILayout.Width(26); optW28 = GUILayout.Width(28); optW30 = GUILayout.MinWidth(30); optW40 = GUILayout.Width(40);
+            optWMin100 = GUILayout.MinWidth(100); optWMax200 = GUILayout.MaxWidth(200); optWMax165 = GUILayout.MaxWidth(165);
 
-            optW15 = GUILayout.Width(15);
-            optW18 = GUILayout.Width(18);
-            optW20 = GUILayout.Width(20);
-            optW24 = GUILayout.Width(24);
-            optW26 = GUILayout.Width(26);
-            optW28 = GUILayout.Width(28);
-            optW30 = GUILayout.MinWidth(30);
-            optW40 = GUILayout.Width(40);
-            optWMin100 = GUILayout.MinWidth(100);
-            optWMax200 = GUILayout.MaxWidth(200);
-            optWMax165 = GUILayout.MaxWidth(165);
-
-            optH1 = GUILayout.Height(1);
-            optH18 = GUILayout.Height(18);
-            optH22 = GUILayout.Height(22);
-            optH24 = GUILayout.Height(24);
-            optH30 = GUILayout.Height(30);
+            optH1 = GUILayout.Height(1); optH18 = GUILayout.Height(18); optH22 = GUILayout.Height(22); optH24 = GUILayout.Height(24); optH30 = GUILayout.Height(30);
             optExpandTrue = GUILayout.ExpandWidth(true);
 
             if (cachedLayerContent == null) cachedLayerContent = new GUIContent("選択なし (なし)");
@@ -395,135 +361,107 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void OnGUI()
     {
+        EnsureCollectionsInitialized();
+
         InitializeGUIStylesIfNeeded();
+
+        if (EditorApplication.isPlayingOrWillChangePlaymode)
+        {
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            GUILayout.Label("▶ 再生モード中です\n安全のため表情の編集をロックしています", centerLockStyle, GUILayout.Height(40));
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+            GUILayout.FlexibleSpace();
+            return;
+        }
 
         EditorGUIUtility.labelWidth = 95f;
 
-        // 左右分割（スプリットパネル）表示
         EditorGUILayout.BeginHorizontal();
-
-        // 1. 左側：詳細フィルターパネル（有効時のみ表示）
         if (isFilterWindowOpen)
         {
             leftScrollPos = EditorGUILayout.BeginScrollView(leftScrollPos, GUILayout.Width(filterPanelWidth), GUILayout.ExpandHeight(true));
             DrawDetailFilterPanel();
             EditorGUILayout.EndScrollView();
 
-            // スプリッター（ドラッグ用境界線）の描画
             Rect splitterRect = GUILayoutUtility.GetRect(5, position.height, GUILayout.ExpandHeight(true), GUILayout.Width(5));
             EditorGUIUtility.AddCursorRect(splitterRect, MouseCursor.ResizeHorizontal);
-
-            if (Event.current.type == EventType.MouseDown && splitterRect.Contains(Event.current.mousePosition))
-            {
-                isResizingFilter = true;
-            }
-
-            if (isResizingFilter)
-            {
-                filterPanelWidth = Event.current.mousePosition.x;
-                filterPanelWidth = Mathf.Clamp(filterPanelWidth, 110f, 350f);
-                Repaint();
-            }
-
-            // ドラッグ終了時
-            if (Event.current.type == EventType.MouseUp && isResizingFilter)
-            {
-                isResizingFilter = false;
-                this.minSize = new Vector2(350f + filterPanelWidth, 400f);
-                SaveCurrentSettings();
-            }
+            if (Event.current.type == EventType.MouseDown && splitterRect.Contains(Event.current.mousePosition)) isResizingFilter = true;
+            if (isResizingFilter) { filterPanelWidth = Mathf.Clamp(Event.current.mousePosition.x, 110f, 350f); Repaint(); }
+            if (Event.current.type == EventType.MouseUp && isResizingFilter) { isResizingFilter = false; this.minSize = new Vector2(350f + filterPanelWidth, 400f); SaveCurrentSettings(); }
         }
 
-        // 2. 右側：メイン表情エディタ本体
         rightScrollPos = EditorGUILayout.BeginScrollView(rightScrollPos, optExpandTrue, GUILayout.ExpandHeight(true));
         DrawControlPanel();
         EditorGUILayout.EndScrollView();
-
         EditorGUILayout.EndHorizontal();
+    }
+
+    private void EnsureCollectionsInitialized()
+    {
+        if (favoriteShapes == null) favoriteShapes = new HashSet<string>();
+        if (currentExpressionValues == null) currentExpressionValues = new Dictionary<string, float>();
+        if (registeredShapeKeys == null) registeredShapeKeys = new HashSet<string>();
+        if (dirtyShapeKeys == null) dirtyShapeKeys = new HashSet<string>();
+        if (clipExpressionValues == null) clipExpressionValues = new Dictionary<string, Dictionary<string, float>>();
+        if (activeObjectValues == null) activeObjectValues = new Dictionary<string, bool>();
+        if (smrPathCache == null) smrPathCache = new Dictionary<SkinnedMeshRenderer, string>();
+        if (baseShapeKeyBackup == null) baseShapeKeyBackup = new Dictionary<string, Dictionary<string, float>>();
+        if (mirrorShapeMap == null) mirrorShapeMap = new Dictionary<string, string>();
+        if (copyTargetShapes == null) copyTargetShapes = new HashSet<string>();
+        if (clipboardValues == null) clipboardValues = new Dictionary<string, float>();
+        if (copyTargetObjects == null) copyTargetObjects = new HashSet<string>();
+        if (clipboardObjectValues == null) clipboardObjectValues = new Dictionary<string, bool>();
+        if (manuallyCreatedClips == null) manuallyCreatedClips = new List<AnimationClip>();
+        if (availableSmrs == null) availableSmrs = new List<SkinnedMeshRenderer>();
+        if (availableClips == null) availableClips = new List<AnimationClip>();
+        if (cachedControllers == null) cachedControllers = new List<AnimatorController>();
+        if (layerNames == null) layerNames = new List<string>();
+        if (selectedLayers == null) selectedLayers = new bool[0];
+        if (detailFilterWords == null) detailFilterWords = new List<string>();
+        if (detailFilterActives == null) detailFilterActives = new List<bool>();
+        if (sortedShapeKeyNames == null) sortedShapeKeyNames = new List<string>();
+        if (cachedShapeContents == null) cachedShapeContents = new GUIContent[0];
+        if (cachedActiveObjects == null) cachedActiveObjects = new List<ActiveObjectCache>();
+        if (optShapeLabelW == null) lastShapeLabelW = -1f;
+        if (optSliderW == null) lastSliderW = -1f;
+        if (optObjLabelW == null) lastObjLabelW = -1f;
+        if (optToggleW == null) lastToggleW = -1f;
     }
 
     private void DrawDetailFilterPanel()
     {
         if (rootObject == null) return;
-
         EditorGUILayout.Space(5);
         for (int i = 0; i < detailFilterWords.Count; i++)
         {
             EditorGUILayout.BeginHorizontal();
+            EditorGUI.BeginChangeCheck(); bool active = EditorGUILayout.Toggle(detailFilterActives[i], optW15);
+            if (EditorGUI.EndChangeCheck()) { detailFilterActives[i] = active; ApplySorting(); ForceRepaintPreview(); SaveCurrentSettings(); }
 
-            EditorGUI.BeginChangeCheck();
-            bool active = EditorGUILayout.Toggle(detailFilterActives[i], optW15);
-            if (EditorGUI.EndChangeCheck())
-            {
-                detailFilterActives[i] = active;
-                ApplySorting();
-                ForceRepaintPreview();
-                SaveCurrentSettings();
-            }
-
-            EditorGUI.BeginChangeCheck();
-            string word = EditorGUILayout.TextField(detailFilterWords[i]);
-            if (EditorGUI.EndChangeCheck())
-            {
-                detailFilterWords[i] = word;
-                ApplySorting();
-                ForceRepaintPreview();
-                SaveCurrentSettings();
-            }
+            EditorGUI.BeginChangeCheck(); string word = EditorGUILayout.TextField(detailFilterWords[i]);
+            if (EditorGUI.EndChangeCheck()) { detailFilterWords[i] = word; ApplySorting(); ForceRepaintPreview(); SaveCurrentSettings(); }
 
             GUI.backgroundColor = new Color(1f, 0.8f, 0.8f);
-            if (GUILayout.Button("✕", optW24))
-            {
-                detailFilterWords.RemoveAt(i);
-                detailFilterActives.RemoveAt(i);
-                ApplySorting();
-                ForceRepaintPreview();
-                SaveCurrentSettings();
-
-                GUI.backgroundColor = Color.white;
-                EditorGUILayout.EndHorizontal();
-                GUIUtility.ExitGUI();
-            }
+            if (GUILayout.Button("✕", optW24)) { detailFilterWords.RemoveAt(i); detailFilterActives.RemoveAt(i); ApplySorting(); ForceRepaintPreview(); SaveCurrentSettings(); GUI.backgroundColor = Color.white; EditorGUILayout.EndHorizontal(); GUIUtility.ExitGUI(); }
             GUI.backgroundColor = Color.white;
-
             EditorGUILayout.EndHorizontal();
         }
-
         EditorGUILayout.Space(5);
-
         GUI.backgroundColor = new Color(0.8f, 1f, 0.8f);
-        if (GUILayout.Button("＋ 条件を追加", GUILayout.Height(24)))
-        {
-            detailFilterWords.Add("");
-            detailFilterActives.Add(true);
-            ApplySorting();
-            SaveCurrentSettings();
-        }
+        if (GUILayout.Button("＋ 条件を追加", GUILayout.Height(24))) { detailFilterWords.Add(""); detailFilterActives.Add(true); ApplySorting(); SaveCurrentSettings(); }
         GUI.backgroundColor = Color.white;
-    }
-
-    private bool IsDocked()
-    {
-        var property = typeof(EditorWindow).GetProperty("docked", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        if (property != null)
-        {
-            return (bool)property.GetValue(this, null);
-        }
-        return false;
     }
 
     private void DrawControlPanel()
     {
-        float rowWidth = position.width - 18f;
-        if (isFilterWindowOpen) rowWidth -= (filterPanelWidth + 10f);
+        float rowWidth = position.width - 18f; if (isFilterWindowOpen) rowWidth -= (filterPanelWidth + 10f);
 
         Rect row1Rect = EditorGUILayout.GetControlRect(optH18);
-
-        float avatarLabelWidth = 50f;
-        float meshLabelWidth = 65f;
-
-        float firstRowRemaining = rowWidth - (avatarLabelWidth + meshLabelWidth + 10f);
-        float firstRowFieldWidth = Mathf.Clamp(firstRowRemaining / 2f, 40f, 180f);
+        float avatarLabelWidth = 50f; float meshLabelWidth = 65f;
+        float firstRowFieldWidth = Mathf.Clamp((rowWidth - (avatarLabelWidth + meshLabelWidth + 10f)) / 2f, 40f, 180f);
 
         Rect avatarLabelRect = new Rect(row1Rect.x, row1Rect.y, avatarLabelWidth, 18);
         Rect avatarFieldRect = new Rect(avatarLabelRect.xMax, row1Rect.y, firstRowFieldWidth, 18);
@@ -551,48 +489,29 @@ public class VRC_ExpressionEditor : EditorWindow
         }
 
         Rect row2Rect = EditorGUILayout.GetControlRect(optH18);
-
-        float layerLabelWidth = 70f;
-        float reloadBtnWidth = 70f;
-        float layerMin = 150f;
-        float layerMax = 500f;
-
-        float layerFieldWidth = Mathf.Clamp(rowWidth * 0.50f, layerMin, layerMax);
-
-        Rect layerLabelRect = new Rect(row2Rect.x, row2Rect.y, layerLabelWidth, 18);
-        Rect layerFieldRect = new Rect(layerLabelRect.xMax, row2Rect.y, layerFieldWidth, 18);
-
-        float reloadBtnX = row2Rect.x + rowWidth - reloadBtnWidth;
-        Rect reloadBtnRect = new Rect(reloadBtnX, row2Rect.y, reloadBtnWidth, 18);
+        Rect layerLabelRect = new Rect(row2Rect.x, row2Rect.y, 70f, 18);
+        Rect layerFieldRect = new Rect(layerLabelRect.xMax, row2Rect.y, Mathf.Clamp(rowWidth * 0.50f, 150f, 500f), 18);
+        Rect reloadBtnRect = new Rect(row2Rect.x + rowWidth - 70f, row2Rect.y, 70f, 18);
 
         if (layerNames.Count > 0)
         {
             GUI.Label(layerLabelRect, "対象レイヤー");
-            if (GUI.Button(layerFieldRect, cachedLayerContent, EditorStyles.popup))
-                UnityEditor.PopupWindow.Show(layerFieldRect, new ExpressionEditorLayerPopup(this));
+            if (GUI.Button(layerFieldRect, cachedLayerContent, EditorStyles.popup)) UnityEditor.PopupWindow.Show(layerFieldRect, new ExpressionEditorLayerPopup(this));
         }
 
         if (GUI.Button(reloadBtnRect, "リロード")) RefreshData(false);
 
-        EditorGUILayout.BeginHorizontal();
-        GUILayout.Label("アニメ", optW40);
+        EditorGUILayout.BeginHorizontal(); GUILayout.Label("アニメ", optW40);
 
         if (availableClips.Count > 0)
         {
             EditorGUI.BeginChangeCheck();
             selectedClipIndex = EditorGUILayout.Popup(selectedClipIndex, clipNamesCache, optWMin100, optWMax200);
-            if (EditorGUI.EndChangeCheck())
-            {
-                if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues);
-                UpdateCacheArrays(); RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview();
-            }
+            if (EditorGUI.EndChangeCheck()) { if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues); UpdateCacheArrays(); RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview(); }
         }
-        else { EditorGUILayout.LabelField("なし"); }
+        else EditorGUILayout.LabelField("なし");
 
-        if (isMultiFrameCache)
-        {
-            GUILayout.Label(warnIconContent, optW18, optH18);
-        }
+        if (isMultiFrameCache) GUILayout.Label(warnIconContent, optW18, optH18);
 
         if (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0)
         {
@@ -600,115 +519,65 @@ public class VRC_ExpressionEditor : EditorWindow
             if (manuallyCreatedClips.Contains(currentClip))
             {
                 Color prevColor = GUI.backgroundColor; GUI.backgroundColor = new Color(1f, 0.8f, 0.8f);
-                if (GUILayout.Button(trashIconContent, optW24, optH18))
-                {
-                    RemoveClipFromManualList(currentClip); GUI.backgroundColor = prevColor; GUIUtility.ExitGUI();
-                }
+                if (GUILayout.Button(trashIconContent, optW24, optH18)) { RemoveClipFromManualList(currentClip); GUI.backgroundColor = prevColor; GUIUtility.ExitGUI(); }
                 GUI.backgroundColor = prevColor;
             }
         }
 
         if (GUILayout.Button(createIconContent, optW24, optH18)) CreateNewAnimationClip();
-
         if (GUILayout.Button(openIconContent, optW24, optH18))
         {
             string absPath = EditorUtility.OpenFilePanel("アニメーションファイルを開く", Application.dataPath, "anim");
             if (!string.IsNullOrEmpty(absPath))
             {
-                string relativePath = "Assets" + absPath.Substring(Application.dataPath.Length);
-                AnimationClip loadedClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(relativePath);
+                AnimationClip loadedClip = AssetDatabase.LoadAssetAtPath<AnimationClip>("Assets" + absPath.Substring(Application.dataPath.Length));
                 if (loadedClip != null) SelectNewClipManually(loadedClip);
             }
         }
 
         AnimationClip dragClip = null;
-        EditorGUI.BeginChangeCheck();
-        dragClip = (AnimationClip)EditorGUILayout.ObjectField(dragClip, typeof(AnimationClip), false, optW30, optWMax165);
+        EditorGUI.BeginChangeCheck(); dragClip = (AnimationClip)EditorGUILayout.ObjectField(dragClip, typeof(AnimationClip), false, optW30, optWMax165);
         if (EditorGUI.EndChangeCheck() && dragClip != null) SelectNewClipManually(dragClip);
-
         EditorGUILayout.EndHorizontal();
 
         Rect row4Rect = EditorGUILayout.GetControlRect(optH18);
+        Rect searchFieldRect = new Rect(row4Rect.x, row4Rect.y, Mathf.Clamp(rowWidth - (105f + 84f + 20f + 20f + 30f), 50f, 250f), 18);
 
-        float sortPopupWidth = 105f;
-        float toolBtnsWidth = 84f;
-        float jumpBtnWidth = 20f;
-
-        float fourthRowRemaining = rowWidth - (sortPopupWidth + toolBtnsWidth + jumpBtnWidth + 20f + 30f);
-        float searchFieldWidth = Mathf.Clamp(fourthRowRemaining, 50f, 250f);
-
-        Rect searchFieldRect = new Rect(row4Rect.x, row4Rect.y, searchFieldWidth, 18);
-
-        EditorGUI.BeginChangeCheck();
-        searchFilter = EditorGUI.TextField(searchFieldRect, searchFilter);
+        EditorGUI.BeginChangeCheck(); searchFilter = EditorGUI.TextField(searchFieldRect, searchFilter);
         if (EditorGUI.EndChangeCheck()) ApplySorting();
 
-        if (string.IsNullOrEmpty(searchFilter))
-        {
-            Rect placeholderRect = new Rect(searchFieldRect.x + 3f, searchFieldRect.y + 1f, searchFieldRect.width, 18);
-            GUI.Label(placeholderRect, "絞り込み...", cachedPlaceholderStyle);
-        }
+        if (string.IsNullOrEmpty(searchFilter)) GUI.Label(new Rect(searchFieldRect.x + 3f, searchFieldRect.y + 1f, searchFieldRect.width, 18), "絞り込み...", cachedPlaceholderStyle);
 
         float currentToolsX = searchFieldRect.xMax + 2f;
-
         Rect gearRect = new Rect(currentToolsX, row4Rect.y, 24, 18);
         if (isFilterWindowOpen) GUI.backgroundColor = new Color(0.7f, 0.9f, 1f);
+        EditorGUI.BeginChangeCheck(); bool toggleFilter = GUI.Toggle(gearRect, isFilterWindowOpen, gearIconContent, GUI.skin.button);
+        if (EditorGUI.EndChangeCheck()) { isFilterWindowOpen = toggleFilter; SaveCurrentSettings(); ApplySorting(); Repaint(); }
+        GUI.backgroundColor = Color.white; currentToolsX = gearRect.xMax + 2f;
 
-        EditorGUI.BeginChangeCheck();
-        bool toggleFilter = GUI.Toggle(gearRect, isFilterWindowOpen, gearIconContent, GUI.skin.button);
-        if (EditorGUI.EndChangeCheck())
-        {
-            isFilterWindowOpen = toggleFilter;
-            SaveCurrentSettings();
-            ApplySorting();
-            Repaint();
-        }
-        GUI.backgroundColor = Color.white;
-        currentToolsX = gearRect.xMax + 2f;
+        if (!string.IsNullOrEmpty(searchFilter)) { Rect cancelRect = new Rect(currentToolsX, row4Rect.y, 18, 18); if (GUI.Button(cancelRect, "✕")) { searchFilter = ""; GUI.FocusControl(null); ApplySorting(); } currentToolsX = cancelRect.xMax + 2f; }
 
-        if (!string.IsNullOrEmpty(searchFilter))
-        {
-            Rect cancelRect = new Rect(currentToolsX, row4Rect.y, 18, 18);
-            if (GUI.Button(cancelRect, "✕")) { searchFilter = ""; GUI.FocusControl(null); ApplySorting(); }
-            currentToolsX = cancelRect.xMax + 2f;
-        }
+        Rect sortRect = new Rect(currentToolsX, row4Rect.y, 105f, 18); GUI.Label(sortRect, cachedSortTooltipContent);
+        EditorGUI.BeginChangeCheck(); currentSortMode = (SortMode)EditorGUI.Popup(sortRect, (int)currentSortMode, SORT_MODE_NAMES);
+        if (EditorGUI.EndChangeCheck()) ApplySorting(); currentToolsX = sortRect.xMax + 5f;
 
-        Rect sortRect = new Rect(currentToolsX, row4Rect.y, sortPopupWidth, 18);
-        GUI.Label(sortRect, cachedSortTooltipContent);
-        EditorGUI.BeginChangeCheck();
-        currentSortMode = (SortMode)EditorGUI.Popup(sortRect, (int)currentSortMode, SORT_MODE_NAMES);
-        if (EditorGUI.EndChangeCheck()) ApplySorting();
-        currentToolsX = sortRect.xMax + 5f;
-
-        Rect linkRect = new Rect(currentToolsX, row4Rect.y, 26, 18);
-        Color oldBg = GUI.backgroundColor;
+        Rect linkRect = new Rect(currentToolsX, row4Rect.y, 26, 18); Color oldBg = GUI.backgroundColor;
         if (autoLinkShapeKeys) GUI.backgroundColor = new Color(0.6f, 1f, 0.6f);
-
-        EditorGUI.BeginChangeCheck();
-        autoLinkShapeKeys = GUI.Toggle(linkRect, autoLinkShapeKeys, linkIconContent, GUI.skin.button);
-        if (EditorGUI.EndChangeCheck()) SaveCurrentSettings();
-
-        GUI.backgroundColor = oldBg;
-        currentToolsX = linkRect.xMax + 2f;
+        EditorGUI.BeginChangeCheck(); autoLinkShapeKeys = GUI.Toggle(linkRect, autoLinkShapeKeys, linkIconContent, GUI.skin.button);
+        if (EditorGUI.EndChangeCheck()) SaveCurrentSettings(); GUI.backgroundColor = oldBg; currentToolsX = linkRect.xMax + 2f;
 
         Rect mirrorRect = new Rect(currentToolsX, row4Rect.y, 26, 18);
         if (isMirroringEnabled) GUI.backgroundColor = new Color(0.6f, 1f, 0.6f);
-
-        EditorGUI.BeginChangeCheck();
-        isMirroringEnabled = GUI.Toggle(mirrorRect, isMirroringEnabled, mirrorIconContent, GUI.skin.button);
-        if (EditorGUI.EndChangeCheck()) SaveCurrentSettings();
-
-        GUI.backgroundColor = oldBg;
-        currentToolsX = mirrorRect.xMax + 2f;
+        EditorGUI.BeginChangeCheck(); isMirroringEnabled = GUI.Toggle(mirrorRect, isMirroringEnabled, mirrorIconContent, GUI.skin.button);
+        if (EditorGUI.EndChangeCheck()) SaveCurrentSettings(); GUI.backgroundColor = oldBg; currentToolsX = mirrorRect.xMax + 2f;
 
         Rect pasteRect = new Rect(currentToolsX, row4Rect.y, 26, 18);
         if (isCopyPasteMode) GUI.backgroundColor = new Color(0.6f, 0.8f, 1f);
-        EditorGUI.BeginChangeCheck();
-        isCopyPasteMode = GUI.Toggle(pasteRect, isCopyPasteMode, copypasteIconContent, GUI.skin.button);
+        EditorGUI.BeginChangeCheck(); isCopyPasteMode = GUI.Toggle(pasteRect, isCopyPasteMode, copypasteIconContent, GUI.skin.button);
         if (EditorGUI.EndChangeCheck()) { GUI.backgroundColor = oldBg; GUIUtility.ExitGUI(); }
         GUI.backgroundColor = oldBg;
 
-        Rect jumpRect = new Rect(row4Rect.x + rowWidth - jumpBtnWidth, row4Rect.y, jumpBtnWidth, 18);
+        Rect jumpRect = new Rect(row4Rect.x + rowWidth - 20f, row4Rect.y, 20f, 18);
         if (GUI.Button(jumpRect, jumpDownIconContent)) leftScrollPos.y = 99999f;
 
         if (isCopyPasteMode)
@@ -718,10 +587,7 @@ public class VRC_ExpressionEditor : EditorWindow
             if (GUILayout.Button("一括貼り付け", optH22)) PasteClipboardValues();
             GUI.backgroundColor = Color.white;
             if (GUILayout.Button("動いているキーを自動選択", optH22)) AutoSelectActiveShapes();
-            if (GUILayout.Button("✕ 選択クリア", optH22))
-            {
-                copyTargetShapes.Clear(); clipboardValues.Clear(); copyTargetObjects.Clear(); clipboardObjectValues.Clear();
-            }
+            if (GUILayout.Button("✕ 選択クリア", optH22)) { copyTargetShapes.Clear(); clipboardValues.Clear(); copyTargetObjects.Clear(); clipboardObjectValues.Clear(); }
             EditorGUILayout.EndHorizontal();
         }
 
@@ -737,107 +603,51 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void BuildMirrorMap()
     {
-        mirrorShapeMap.Clear();
-        if (availableSmrs == null || availableSmrs.Count <= selectedSmrIndex) return;
-        var mesh = availableSmrs[selectedSmrIndex].sharedMesh;
-        if (mesh == null) return;
-
-        HashSet<string> allShapes = new HashSet<string>();
-        for (int i = 0; i < mesh.blendShapeCount; i++) allShapes.Add(mesh.GetBlendShapeName(i));
+        mirrorShapeMap.Clear(); if (availableSmrs == null || availableSmrs.Count <= selectedSmrIndex) return;
+        var mesh = availableSmrs[selectedSmrIndex].sharedMesh; if (mesh == null) return;
+        HashSet<string> allShapes = new HashSet<string>(); for (int i = 0; i < mesh.blendShapeCount; i++) allShapes.Add(mesh.GetBlendShapeName(i));
 
         foreach (string shape in allShapes)
         {
             if (mirrorShapeMap.ContainsKey(shape)) continue;
             foreach (var rule in MIRROR_REPLACE_RULES)
             {
-                if (shape.Contains(rule.l))
-                {
-                    string rTarget = shape.Replace(rule.l, rule.r);
-                    if (allShapes.Contains(rTarget)) { mirrorShapeMap[shape] = rTarget; mirrorShapeMap[rTarget] = shape; break; }
-                }
-                else if (shape.Contains(rule.r))
-                {
-                    string lTarget = shape.Replace(rule.r, rule.l);
-                    if (allShapes.Contains(lTarget)) { mirrorShapeMap[shape] = lTarget; mirrorShapeMap[lTarget] = shape; break; }
-                }
+                if (shape.Contains(rule.l)) { string rTarget = shape.Replace(rule.l, rule.r); if (allShapes.Contains(rTarget)) { mirrorShapeMap[shape] = rTarget; mirrorShapeMap[rTarget] = shape; break; } }
+                else if (shape.Contains(rule.r)) { string lTarget = shape.Replace(rule.r, rule.l); if (allShapes.Contains(lTarget)) { mirrorShapeMap[shape] = lTarget; mirrorShapeMap[lTarget] = shape; break; } }
             }
         }
     }
 
     private void AutoSelectActiveShapes()
     {
-        isCopyPasteMode = true;
-        copyTargetShapes.Clear();
-        clipboardValues.Clear();
-        copyTargetObjects.Clear();
-        clipboardObjectValues.Clear();
-
-        foreach (var kvp in currentExpressionValues)
-        {
-            if (!Mathf.Approximately(kvp.Value, 0f))
-            {
-                copyTargetShapes.Add(kvp.Key);
-                clipboardValues[kvp.Key] = kvp.Value;
-            }
-        }
-
-        foreach (var kvp in activeObjectValues)
-        {
-            copyTargetObjects.Add(kvp.Key);
-            clipboardObjectValues[kvp.Key] = kvp.Value;
-        }
-
-        Debug.Log($"<color=green>[表情エディタ]</color> シェイプ {copyTargetShapes.Count}件、オブジェクト {copyTargetObjects.Count}件を自動選択してコピーしました！");
+        isCopyPasteMode = true; copyTargetShapes.Clear(); clipboardValues.Clear(); copyTargetObjects.Clear(); clipboardObjectValues.Clear();
+        foreach (var kvp in currentExpressionValues) if (!Mathf.Approximately(kvp.Value, 0f)) { copyTargetShapes.Add(kvp.Key); clipboardValues[kvp.Key] = kvp.Value; }
+        foreach (var kvp in activeObjectValues) { copyTargetObjects.Add(kvp.Key); clipboardObjectValues[kvp.Key] = kvp.Value; }
     }
 
     private void PasteClipboardValues()
     {
-        if (clipboardValues.Count == 0 && clipboardObjectValues.Count == 0) return;
-        if (availableClips.Count <= selectedClipIndex) return;
+        if ((clipboardValues.Count == 0 && clipboardObjectValues.Count == 0) || availableClips.Count <= selectedClipIndex) return;
         AnimationClip clip = availableClips[selectedClipIndex];
-
-        int group = Undo.GetCurrentGroup();
-        Undo.SetCurrentGroupName("一括貼り付け");
-
-        foreach (var kvp in clipboardValues)
-        {
-            CommitShapeKeyValue(clip, kvp.Key, kvp.Value);
-        }
-
-        foreach (var kvp in clipboardObjectValues)
-        {
-            CommitObjectActiveValue(clip, kvp.Key, kvp.Value);
-        }
-
-        Undo.CollapseUndoOperations(group);
-        RefreshExpressionCache();
-        ApplySorting();
-        ForceRepaintPreview();
-
-        Debug.Log($"<color=green>[表情エディタ]</color> シェイプ {clipboardValues.Count}件、オブジェクト {clipboardObjectValues.Count}件を一括貼り付けしました！");
+        int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("一括貼り付け");
+        foreach (var kvp in clipboardValues) CommitShapeKeyValue(clip, kvp.Key, kvp.Value);
+        foreach (var kvp in clipboardObjectValues) CommitObjectActiveValue(clip, kvp.Key, kvp.Value);
+        Undo.CollapseUndoOperations(group); RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview();
     }
 
     private void RemoveClipFromManualList(AnimationClip clip)
     {
         if (clip == null) return;
         if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues);
-
-        manuallyCreatedClips.Remove(clip);
-        UpdateAvailableClips();
-
-        selectedClipIndex = 0;
-        RefreshExpressionCache();
-        ApplySorting();
-        ForceRepaintPreview();
-        SaveCurrentSettings();
+        manuallyCreatedClips.Remove(clip); UpdateAvailableClips(); selectedClipIndex = 0;
+        RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview(); SaveCurrentSettings();
     }
 
     private void SelectNewClipManually(AnimationClip clip)
     {
         if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues);
         if (!manuallyCreatedClips.Contains(clip)) manuallyCreatedClips.Add(clip);
-        UpdateAvailableClips();
-        int idx = availableClips.IndexOf(clip);
+        UpdateAvailableClips(); int idx = availableClips.IndexOf(clip);
         if (idx != -1) { selectedClipIndex = idx; RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview(); }
         SaveCurrentSettings();
     }
@@ -845,122 +655,78 @@ public class VRC_ExpressionEditor : EditorWindow
     private void DrawShapeKeySliders()
     {
         AnimationClip clip = availableClips[selectedClipIndex];
-        float viewWidth = position.width - 16f;
-        if (isFilterWindowOpen) viewWidth -= (filterPanelWidth + 10f);
-
+        float viewWidth = position.width - 16f; if (isFilterWindowOpen) viewWidth -= (filterPanelWidth + 10f);
         float checkboxWidth = isCopyPasteMode ? 18f : 0f;
         float requiredToolsWidth = checkboxWidth + 15f + 15f + 40f + 40f + 25f;
         float labelLimitWidth = viewWidth - requiredToolsWidth;
-
         float labelWidth = Mathf.Clamp(viewWidth * 0.40f, 75f, Mathf.Min(cachedMaxShapeNameWidth, labelLimitWidth));
         if (lastShapeLabelW != labelWidth) { lastShapeLabelW = labelWidth; optShapeLabelW = GUILayout.Width(labelWidth); }
 
+        // 追加：再生から戻った際などの配列のサイズ不整合エラーを絶対に防ぐ
+        if (cachedShapeContents == null || cachedShapeContents.Length != sortedShapeKeyNames.Count)
+        {
+            cachedShapeContents = new GUIContent[sortedShapeKeyNames.Count];
+            for (int i = 0; i < sortedShapeKeyNames.Count; i++)
+            {
+                cachedShapeContents[i] = new GUIContent(sortedShapeKeyNames[i], sortedShapeKeyNames[i]);
+            }
+        }
+
         for (int i = 0; i < sortedShapeKeyNames.Count; i++)
         {
-            string shapeName = sortedShapeKeyNames[i];
-            GUIContent shapeContent = cachedShapeContents[i];
-
-            float currentValue = 0f;
-            if (currentExpressionValues.ContainsKey(shapeName)) currentValue = currentExpressionValues[shapeName];
+            string shapeName = sortedShapeKeyNames[i]; GUIContent shapeContent = cachedShapeContents[i];
+            float currentValue = currentExpressionValues.ContainsKey(shapeName) ? currentExpressionValues[shapeName] : 0f;
             bool isRegistered = registeredShapeKeys.Contains(shapeName);
-
             GUIStyle currentLabelStyle = isRegistered ? cachedBoldLabelStyle : cachedNormalLabelStyle;
-            if (isRegistered) GUI.contentColor = !Mathf.Approximately(currentValue, 0f) ? new Color(0.4f, 1f, 0.4f) : Color.white;
-            else GUI.contentColor = new Color(0.8f, 0.8f, 0.8f);
+            GUI.contentColor = isRegistered ? (!Mathf.Approximately(currentValue, 0f) ? new Color(0.4f, 1f, 0.4f) : Color.white) : new Color(0.8f, 0.8f, 0.8f);
 
             EditorGUILayout.BeginHorizontal();
-
             float currentCheckboxWidth = 0f;
             if (isCopyPasteMode)
             {
-                currentCheckboxWidth = 18f;
-                bool isSelected = copyTargetShapes.Contains(shapeName);
-                EditorGUI.BeginChangeCheck();
-                bool selectNew = GUILayout.Toggle(isSelected, "", optW15);
-                if (EditorGUI.EndChangeCheck())
-                {
-                    if (selectNew) { copyTargetShapes.Add(shapeName); clipboardValues[shapeName] = currentValue; }
-                    else { copyTargetShapes.Remove(shapeName); clipboardValues.Remove(shapeName); }
-                }
+                currentCheckboxWidth = 18f; bool isSelected = copyTargetShapes.Contains(shapeName);
+                EditorGUI.BeginChangeCheck(); bool selectNew = GUILayout.Toggle(isSelected, "", optW15);
+                if (EditorGUI.EndChangeCheck()) { if (selectNew) { copyTargetShapes.Add(shapeName); clipboardValues[shapeName] = currentValue; } else { copyTargetShapes.Remove(shapeName); clipboardValues.Remove(shapeName); } }
             }
 
             bool isFav = favoriteShapes.Contains(shapeName);
-            Color oldCol = GUI.contentColor;
-            GUI.contentColor = isFav ? new Color(1f, 0.8f, 0.2f) : Color.gray;
-
-            GUIContent favContent = isFav ? cachedFavOnContent : cachedFavOffContent;
-
-            if (GUILayout.Button(favContent, EditorStyles.label, optW15))
-            {
-                if (isFav) favoriteShapes.Remove(shapeName); else favoriteShapes.Add(shapeName);
-                ApplySorting(); SaveCurrentSettings(); GUIUtility.ExitGUI();
-            }
+            Color oldCol = GUI.contentColor; GUI.contentColor = isFav ? new Color(1f, 0.8f, 0.2f) : Color.gray;
+            if (GUILayout.Button(isFav ? cachedFavOnContent : cachedFavOffContent, EditorStyles.label, optW15)) { if (isFav) favoriteShapes.Remove(shapeName); else favoriteShapes.Add(shapeName); ApplySorting(); SaveCurrentSettings(); GUIUtility.ExitGUI(); }
             GUI.contentColor = oldCol;
 
-            string toggleLabel = isRegistered ? "●" : "○";
-
-            if (GUILayout.Button(toggleLabel, cachedDotButtonStyle, optW15))
-            {
-                if (isRegistered) RemoveShapeKeyValue(clip, shapeName); else CommitShapeKeyValue(clip, shapeName, 0f);
-                ApplySorting(); ForceRepaintPreview();
-            }
+            if (GUILayout.Button(isRegistered ? "●" : "○", cachedDotButtonStyle, optW15)) { if (isRegistered) RemoveShapeKeyValue(clip, shapeName); else CommitShapeKeyValue(clip, shapeName, 0f); ApplySorting(); ForceRepaintPreview(); }
 
             GUILayout.Label(shapeContent, currentLabelStyle, optShapeLabelW);
 
             float sliderWidth = Mathf.Max(40f, viewWidth - (currentCheckboxWidth + 15f + 15f + labelWidth + 40f + 25f));
             if (lastSliderW != sliderWidth) { lastSliderW = sliderWidth; optSliderW = GUILayout.Width(sliderWidth); }
 
-            float sliderDisplayValue = Mathf.Clamp(currentValue, 0f, 100f);
-
-            EditorGUI.BeginChangeCheck();
-            float newValue = GUILayout.HorizontalSlider(sliderDisplayValue, 0f, 100f, optSliderW);
+            EditorGUI.BeginChangeCheck(); float newValue = GUILayout.HorizontalSlider(Mathf.Clamp(currentValue, 0f, 100f), 0f, 100f, optSliderW);
             if (EditorGUI.EndChangeCheck()) UpdateMemoryValueOnly(shapeName, newValue);
 
-            EditorGUI.BeginChangeCheck();
-            float textValue = EditorGUILayout.FloatField(currentValue, optW40);
+            EditorGUI.BeginChangeCheck(); float textValue = EditorGUILayout.FloatField(currentValue, optW40);
             if (EditorGUI.EndChangeCheck()) UpdateMemoryValueOnly(shapeName, textValue);
 
-            EditorGUILayout.EndHorizontal();
-            GUI.contentColor = Color.white;
+            EditorGUILayout.EndHorizontal(); GUI.contentColor = Color.white;
         }
     }
 
     private void UpdateMemoryValueOnly(string shapeName, float value, bool isMirrorCall = false)
     {
-        currentExpressionValues[shapeName] = value;
-        dirtyShapeKeys.Add(shapeName);
-        ForceRepaintPreview();
-
+        currentExpressionValues[shapeName] = value; dirtyShapeKeys.Add(shapeName); ForceRepaintPreview();
         if (VRC_ExpressionPreview.Instance != null && availableSmrs != null && availableSmrs.Count > selectedSmrIndex)
-        {
-            var targetSmr = availableSmrs[selectedSmrIndex];
-            if (smrPathCache.TryGetValue(targetSmr, out string path))
-            {
-                VRC_ExpressionPreview.Instance.UpdateSingleBlendShapeImmediate(path, shapeName, value);
-            }
-        }
-
-        if (isCopyPasteMode && copyTargetShapes.Contains(shapeName))
-        {
-            clipboardValues[shapeName] = value;
-        }
-
-        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner))
-        {
-            UpdateMemoryValueOnly(partner, value, true);
-        }
+            if (smrPathCache.TryGetValue(availableSmrs[selectedSmrIndex], out string path)) VRC_ExpressionPreview.Instance.UpdateSingleBlendShapeImmediate(path, shapeName, value);
+        if (isCopyPasteMode && copyTargetShapes.Contains(shapeName)) clipboardValues[shapeName] = value;
+        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner)) UpdateMemoryValueOnly(partner, value, true);
     }
 
     private void CommitShapeKeyValue(AnimationClip clip, string shapeName, float value, bool isMirrorCall = false)
     {
-        int group = Undo.GetCurrentGroup();
-        Undo.SetCurrentGroupName("表情シェイプ変更");
-
+        int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("表情シェイプ変更");
         SkinnedMeshRenderer mainSmr = availableSmrs[selectedSmrIndex];
         string mainPath = smrPathCache.ContainsKey(mainSmr) ? smrPathCache[mainSmr] : GetRelativePath(mainSmr.gameObject);
 
-        EditorCurveBinding mainBinding = EditorCurveBinding.FloatCurve(mainPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName);
-        RegisterShapeKeyConstant(clip, mainBinding, value);
+        RegisterShapeKeyConstant(clip, EditorCurveBinding.FloatCurve(mainPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), value);
 
         if (autoLinkShapeKeys)
         {
@@ -970,37 +736,25 @@ public class VRC_ExpressionEditor : EditorWindow
                 if (smr.sharedMesh.GetBlendShapeIndex(shapeName) != -1)
                 {
                     string path = smrPathCache.ContainsKey(smr) ? smrPathCache[smr] : GetRelativePath(smr.gameObject);
-                    EditorCurveBinding linkedBinding = EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeName);
-                    RegisterShapeKeyConstant(clip, linkedBinding, value);
+                    RegisterShapeKeyConstant(clip, EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), value);
                 }
             }
         }
-
-        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner))
-        {
-            CommitShapeKeyValue(clip, partner, value, true);
-        }
-
-        Undo.CollapseUndoOperations(group);
-        ForceRepaintPreview();
+        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner)) CommitShapeKeyValue(clip, partner, value, true);
+        Undo.CollapseUndoOperations(group); ForceRepaintPreview();
     }
 
     private void RemoveShapeKeyValue(AnimationClip clip, string shapeName, bool isMirrorCall = false)
     {
-        int group = Undo.GetCurrentGroup();
-        Undo.SetCurrentGroupName("シェイプキー登録解除");
-
+        int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("シェイプキー登録解除");
         SkinnedMeshRenderer mainSmr = availableSmrs[selectedSmrIndex];
         string mainPath = smrPathCache.ContainsKey(mainSmr) ? smrPathCache[mainSmr] : GetRelativePath(mainSmr.gameObject);
 
-        EditorCurveBinding binding = EditorCurveBinding.FloatCurve(mainPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName);
         Undo.RecordObject(clip, "シェイプキー削除");
-        AnimationUtility.SetEditorCurve(clip, binding, null);
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve(mainPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), null);
 
         if (clipExpressionValues.TryGetValue(mainPath, out var dict)) dict.Remove(shapeName);
-        currentExpressionValues.Remove(shapeName);
-        registeredShapeKeys.Remove(shapeName);
-        dirtyShapeKeys.Remove(shapeName);
+        currentExpressionValues.Remove(shapeName); registeredShapeKeys.Remove(shapeName); dirtyShapeKeys.Remove(shapeName);
 
         if (autoLinkShapeKeys)
         {
@@ -1010,18 +764,12 @@ public class VRC_ExpressionEditor : EditorWindow
                 if (smr.sharedMesh.GetBlendShapeIndex(shapeName) != -1)
                 {
                     string path = smrPathCache.ContainsKey(smr) ? smrPathCache[smr] : GetRelativePath(smr.gameObject);
-                    EditorCurveBinding linkedBinding = EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeName);
-                    AnimationUtility.SetEditorCurve(clip, linkedBinding, null);
+                    AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), null);
                     if (clipExpressionValues.TryGetValue(path, out var lDict)) lDict.Remove(shapeName);
                 }
             }
         }
-
-        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner))
-        {
-            if (registeredShapeKeys.Contains(partner)) RemoveShapeKeyValue(clip, partner, true);
-        }
-
+        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner)) if (registeredShapeKeys.Contains(partner)) RemoveShapeKeyValue(clip, partner, true);
         Undo.CollapseUndoOperations(group);
     }
 
@@ -1029,165 +777,90 @@ public class VRC_ExpressionEditor : EditorWindow
     {
         if (availableClips.Count <= selectedClipIndex) return;
         AnimationClip clip = availableClips[selectedClipIndex];
-        float viewWidth = position.width - 16f;
-        if (isFilterWindowOpen) viewWidth -= (filterPanelWidth + 10f);
-
+        float viewWidth = position.width - 16f; if (isFilterWindowOpen) viewWidth -= (filterPanelWidth + 10f);
         float checkboxWidth = isCopyPasteMode ? 18f : 0f;
-        float requiredToolsWidth = checkboxWidth + 15f + 40f + 25f;
-        float labelLimitWidth = viewWidth - requiredToolsWidth;
-
-        float labelWidth = Mathf.Clamp(viewWidth * 0.40f, 75f, Mathf.Min(cachedMaxObjNameWidth, labelLimitWidth));
+        float labelWidth = Mathf.Clamp(viewWidth * 0.40f, 75f, Mathf.Min(cachedMaxObjNameWidth, viewWidth - (checkboxWidth + 15f + 40f + 25f)));
         if (lastObjLabelW != labelWidth) { lastObjLabelW = labelWidth; optObjLabelW = GUILayout.Width(labelWidth); }
 
-        EditorGUILayout.BeginHorizontal();
-        GUILayout.Label("オブジェクト ON / OFF", EditorStyles.boldLabel);
-        GUILayout.FlexibleSpace();
-        if (GUILayout.Button(jumpUpIconContent, optW20, optH18))
-        {
-            leftScrollPos.y = 0f;
-        }
+        EditorGUILayout.BeginHorizontal(); GUILayout.Label("オブジェクト ON / OFF", EditorStyles.boldLabel); GUILayout.FlexibleSpace();
+        if (GUILayout.Button(jumpUpIconContent, optW20, optH18)) leftScrollPos.y = 0f;
         EditorGUILayout.EndHorizontal();
 
-        GUILayout.BeginVertical(GUI.skin.box);
+        // 追加：再生から戻った際などの、オブジェクトリストのサイズ不整合エラーを絶対に防ぐ
+        if (cachedActiveObjects == null || cachedActiveObjects.Count != activeObjectValues.Count)
+        {
+            RecalculateObjNameWidth();
+        }
 
+        GUILayout.BeginVertical(GUI.skin.box);
         foreach (var cache in cachedActiveObjects)
         {
-            string path = cache.path;
-            GUIContent objContent = cache.content;
-            bool isActive = false;
-            if (activeObjectValues.ContainsKey(path)) isActive = activeObjectValues[path];
+            string path = cache.path; GUIContent objContent = cache.content;
+            bool isActive = activeObjectValues.ContainsKey(path) ? activeObjectValues[path] : false;
 
             EditorGUILayout.BeginHorizontal();
-
             float currentCheckboxWidth = 0f;
             if (isCopyPasteMode)
             {
-                currentCheckboxWidth = 18f;
-                bool isSelected = copyTargetObjects.Contains(path);
-                EditorGUI.BeginChangeCheck();
-                bool selectNewVal = GUILayout.Toggle(isSelected, "", optW15);
-                if (EditorGUI.EndChangeCheck())
-                {
-                    if (selectNewVal) { copyTargetObjects.Add(path); clipboardObjectValues[path] = isActive; }
-                    else { copyTargetObjects.Remove(path); clipboardObjectValues.Remove(path); }
-                }
+                currentCheckboxWidth = 18f; bool isSelected = copyTargetObjects.Contains(path);
+                EditorGUI.BeginChangeCheck(); bool selectNewVal = GUILayout.Toggle(isSelected, "", optW15);
+                if (EditorGUI.EndChangeCheck()) { if (selectNewVal) { copyTargetObjects.Add(path); clipboardObjectValues[path] = isActive; } else { copyTargetObjects.Remove(path); clipboardObjectValues.Remove(path); } }
             }
 
-            if (GUILayout.Button("●", cachedDotButtonStyle, optW15))
-            {
-                RemoveObjectActiveValue(clip, path); ForceRepaintPreview();
-                EditorGUILayout.EndHorizontal(); GUIUtility.ExitGUI();
-            }
-
+            if (GUILayout.Button("●", cachedDotButtonStyle, optW15)) { RemoveObjectActiveValue(clip, path); ForceRepaintPreview(); EditorGUILayout.EndHorizontal(); GUIUtility.ExitGUI(); }
             GUILayout.Label(objContent, cachedNormalLabelStyle, optObjLabelW);
 
             float toggleWidth = Mathf.Max(40f, viewWidth - (currentCheckboxWidth + 15f + labelWidth + 25f));
             if (lastToggleW != toggleWidth) { lastToggleW = toggleWidth; optToggleW = GUILayout.Width(toggleWidth); }
 
-            EditorGUI.BeginChangeCheck();
-            bool newVal = GUILayout.Toggle(isActive, isActive ? " ON" : " OFF", optToggleW);
+            EditorGUI.BeginChangeCheck(); bool newVal = GUILayout.Toggle(isActive, isActive ? " ON" : " OFF", optToggleW);
             if (EditorGUI.EndChangeCheck()) { CommitObjectActiveValue(clip, path, newVal); ForceRepaintPreview(); }
             EditorGUILayout.EndHorizontal();
         }
 
-        EditorGUILayout.Space();
-        GUI.backgroundColor = new Color(0.9f, 0.9f, 1f);
+        EditorGUILayout.Space(); GUI.backgroundColor = new Color(0.9f, 0.9f, 1f);
         if (GUILayout.Button("＋ Hierarchyで選択中のオブジェクトを一括登録", optH24))
         {
-            GameObject[] selected = Selection.gameObjects;
-            foreach (GameObject obj in selected)
-            {
-                if (obj == rootObject || !obj.transform.IsChildOf(rootObject.transform)) continue;
-                string path = GetRelativePath(obj); CommitObjectActiveValue(clip, path, obj.activeSelf);
-            }
+            foreach (GameObject obj in Selection.gameObjects) { if (obj == rootObject || !obj.transform.IsChildOf(rootObject.transform)) continue; CommitObjectActiveValue(clip, GetRelativePath(obj), obj.activeSelf); }
             ForceRepaintPreview(); GUIUtility.ExitGUI();
         }
-        GUI.backgroundColor = Color.white;
-        GUILayout.EndVertical();
+        GUI.backgroundColor = Color.white; GUILayout.EndVertical();
     }
 
     private void CommitObjectActiveValue(AnimationClip clip, string path, bool isActive)
     {
-        int group = Undo.GetCurrentGroup();
-        Undo.SetCurrentGroupName("オブジェクト状態変更");
-        Undo.RecordObject(clip, "オブジェクト状態変更");
-
-        EditorCurveBinding binding = EditorCurveBinding.FloatCurve(path, typeof(GameObject), "m_IsActive");
-        AnimationCurve curve = new AnimationCurve(new Keyframe(0f, isActive ? 1f : 0f));
-        AnimationUtility.SetEditorCurve(clip, binding, curve);
-        activeObjectValues[path] = isActive;
-
-        if (isCopyPasteMode && copyTargetObjects.Contains(path))
-        {
-            clipboardObjectValues[path] = isActive;
-        }
-
+        int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("オブジェクト状態変更"); Undo.RecordObject(clip, "オブジェクト状態変更");
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve(path, typeof(GameObject), "m_IsActive"), new AnimationCurve(new Keyframe(0f, isActive ? 1f : 0f)));
+        activeObjectValues[path] = isActive; if (isCopyPasteMode && copyTargetObjects.Contains(path)) clipboardObjectValues[path] = isActive;
         if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.UpdateSingleObjectActiveImmediate(path, isActive);
-        Undo.CollapseUndoOperations(group);
-        RecalculateObjNameWidth();
+        Undo.CollapseUndoOperations(group); RecalculateObjNameWidth();
     }
 
     private void RemoveObjectActiveValue(AnimationClip clip, string path)
     {
-        int group = Undo.GetCurrentGroup();
-        Undo.SetCurrentGroupName("オブジェクト状態解除");
-        Undo.RecordObject(clip, "オブジェクト状態解除");
-
-        EditorCurveBinding binding = EditorCurveBinding.FloatCurve(path, typeof(GameObject), "m_IsActive");
-        AnimationUtility.SetEditorCurve(clip, binding, null);
-        activeObjectValues.Remove(path);
-
-        if (isCopyPasteMode)
-        {
-            copyTargetObjects.Remove(path);
-            clipboardObjectValues.Remove(path);
-        }
-
-        Undo.CollapseUndoOperations(group);
-        RecalculateObjNameWidth();
+        int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("オブジェクト状態解除"); Undo.RecordObject(clip, "オブジェクト状態解除");
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve(path, typeof(GameObject), "m_IsActive"), null);
+        activeObjectValues.Remove(path); if (isCopyPasteMode) { copyTargetObjects.Remove(path); clipboardObjectValues.Remove(path); }
+        Undo.CollapseUndoOperations(group); RecalculateObjNameWidth();
     }
 
     private void DrawActionButtons()
     {
-        float rowWidth = position.width - 18f;
-        if (isFilterWindowOpen) rowWidth -= (filterPanelWidth + 10f);
-
-        GUILayout.BeginVertical(GUI.skin.box);
-        GUILayout.Label("表情ユーティリティ / 一括処理", EditorStyles.boldLabel);
-
-        GUILayout.BeginVertical(GUI.skin.box);
-        GUILayout.Label("参照アニメの項目をコピー", EditorStyles.miniBoldLabel);
+        GUILayout.BeginVertical(GUI.skin.box); GUILayout.Label("表情ユーティリティ / 一括処理", EditorStyles.boldLabel);
+        GUILayout.BeginVertical(GUI.skin.box); GUILayout.Label("参照アニメの項目をコピー", EditorStyles.miniBoldLabel);
         referenceClip = (AnimationClip)EditorGUILayout.ObjectField("参照用", referenceClip, typeof(AnimationClip), false);
-
         if (GUILayout.Button("参照先の全項目を「0」で追加")) ProcessFromReferenceClip();
-
         EditorGUILayout.Space();
-
-        GUI.backgroundColor = new Color(0.8f, 1f, 0.8f);
-        if (GUILayout.Button("全ての未登録キーを「0」で埋める")) ProcessShapeKeys();
-        GUI.backgroundColor = Color.white;
-
+        GUI.backgroundColor = new Color(0.8f, 1f, 0.8f); if (GUILayout.Button("全ての未登録キーを「0」で埋める")) ProcessShapeKeys(); GUI.backgroundColor = Color.white;
         GUILayout.EndVertical();
-
         EditorGUILayout.Space();
-
         GUI.backgroundColor = new Color(1f, 0.7f, 0.7f);
-        if (GUILayout.Button("値がすべて0のトラックを完全に削除"))
-        {
-            if (EditorUtility.DisplayDialog("確認", "値がすべて0のトラックを削除しますか？", "削除", "キャンセル")) DeleteZeroCurves();
-        }
+        if (GUILayout.Button("値がすべて0のトラックを完全に削除")) if (EditorUtility.DisplayDialog("確認", "削除しますか？", "削除", "キャンセル")) DeleteZeroCurves();
         GUI.backgroundColor = Color.white;
-
         if (isClampBlendShapesEnabledCache)
         {
-            EditorGUILayout.Space();
-            GUI.backgroundColor = new Color(1f, 0.8f, 0.8f);
-            if (GUILayout.Button("限界突破有効化（Clamp BlendShapes解除）"))
-            {
-                UncheckClampBlendShapes();
-                isClampBlendShapesEnabledCache = false;
-                ForceRepaintPreview();
-            }
+            EditorGUILayout.Space(); GUI.backgroundColor = new Color(1f, 0.8f, 0.8f);
+            if (GUILayout.Button("限界突破有効化（Clamp BlendShapes解除）")) { UncheckClampBlendShapes(); isClampBlendShapesEnabledCache = false; ForceRepaintPreview(); }
             GUI.backgroundColor = Color.white;
         }
         GUILayout.EndVertical();
@@ -1197,15 +870,10 @@ public class VRC_ExpressionEditor : EditorWindow
     {
         clipNamesCache = availableClips.Select(c => c.name).ToArray();
         smrNamesCache = availableSmrs.Select(s => s.name).ToArray();
-
-        testClipNamesCache = new string[availableClips.Count + 1];
-        testClipNamesCache[0] = "なし (直接指定)";
+        testClipNamesCache = new string[availableClips.Count + 1]; testClipNamesCache[0] = "なし (直接指定)";
         for (int i = 0; i < availableClips.Count; i++) testClipNamesCache[i + 1] = availableClips[i].name;
 
-        if (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0)
-            isMultiFrameCache = CheckIsMultiFrame(availableClips[selectedClipIndex]);
-        else
-            isMultiFrameCache = false;
+        isMultiFrameCache = (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0) ? CheckIsMultiFrame(availableClips[selectedClipIndex]) : false;
 
         if (availableSmrs != null && availableSmrs.Count > selectedSmrIndex)
         {
@@ -1220,35 +888,21 @@ public class VRC_ExpressionEditor : EditorWindow
 
     public void UpdateLayerLabelCache()
     {
-        if (layerNames == null || layerNames.Count == 0 || selectedLayers == null)
-        {
-            if (cachedLayerContent != null) cachedLayerContent.text = "選択なし (なし)";
-            return;
-        }
-
-        int selectedCount = 0;
-        int lastSelectedIndex = -1;
-        for (int i = 0; i < selectedLayers.Length; i++)
-        {
-            if (selectedLayers[i])
-            {
-                selectedCount++;
-                lastSelectedIndex = i;
-            }
-        }
-
+        if (layerNames == null || layerNames.Count == 0 || selectedLayers == null) { if (cachedLayerContent != null) cachedLayerContent.text = "選択なし (なし)"; return; }
+        int selectedCount = 0; int lastSelectedIndex = -1;
+        for (int i = 0; i < selectedLayers.Length; i++) if (selectedLayers[i]) { selectedCount++; lastSelectedIndex = i; }
         string result = "複数選択中...";
         if (selectedCount == selectedLayers.Length) result = "全レイヤー (All)";
         else if (selectedCount == 1 && lastSelectedIndex >= 0) result = layerNames[lastSelectedIndex];
         else if (selectedCount == 0) result = "選択なし (なし)";
-
-        if (cachedLayerContent == null) cachedLayerContent = new GUIContent(result);
-        else cachedLayerContent.text = result;
+        if (cachedLayerContent == null) cachedLayerContent = new GUIContent(result); else cachedLayerContent.text = result;
     }
 
     public void RefreshData() { RefreshData(false); }
     public void RefreshData(bool loadFromSettings)
     {
+        if (EditorApplication.isPlayingOrWillChangePlaymode || EditorApplication.isCompiling) return;
+
         if (rootObject == null)
         {
             availableSmrs = new List<SkinnedMeshRenderer>(); availableClips.Clear(); layerNames.Clear();
@@ -1259,20 +913,13 @@ public class VRC_ExpressionEditor : EditorWindow
 
         if (rootObject != lastSelectionObject)
         {
-            // 🟢 切り替え時の完全初期化
-            manuallyCreatedClips.Clear();
-            favoriteShapes.Clear();
-            detailFilterWords.Clear();
-            detailFilterActives.Clear();
-            referenceClip = null;
-            autoLinkShapeKeys = true;
-            isMirroringEnabled = false;
-
-            lastSelectionObject = rootObject;
+            manuallyCreatedClips.Clear(); favoriteShapes.Clear(); detailFilterWords.Clear(); detailFilterActives.Clear();
+            referenceClip = null; autoLinkShapeKeys = true; isMirroringEnabled = false; lastSelectionObject = rootObject;
         }
 
         string prevSmr = (availableSmrs != null && availableSmrs.Count > selectedSmrIndex) ? availableSmrs[selectedSmrIndex].name : "";
-        string prevClip = (availableClips.Count > selectedClipIndex) ? availableClips[selectedClipIndex].name : "";
+        string prevClipName = (availableClips.Count > selectedClipIndex) ? availableClips[selectedClipIndex].name : "";
+
         Dictionary<string, bool> prevLayers = new Dictionary<string, bool>();
         for (int i = 0; i < layerNames.Count; i++) if (i < selectedLayers.Length) prevLayers[layerNames[i]] = selectedLayers[i];
 
@@ -1281,19 +928,15 @@ public class VRC_ExpressionEditor : EditorWindow
         availableSmrs = rootObject.GetComponentsInChildren<SkinnedMeshRenderer>(true).OrderBy(s => s.name.ToLower() == "body" ? 0 : 1).ThenBy(s => s.name).ToList();
 
         smrPathCache.Clear();
-        foreach (var smr in availableSmrs)
-        {
-            if (smr != null) smrPathCache[smr] = GetRelativePath(smr.gameObject);
-        }
+        foreach (var smr in availableSmrs) if (smr != null) smrPathCache[smr] = GetRelativePath(smr.gameObject);
 
         foreach (var smr in availableSmrs)
         {
             if (smr != null && smr.sharedMesh != null)
             {
-                string path = smrPathCache[smr];
                 var dict = new Dictionary<string, float>();
                 for (int i = 0; i < smr.sharedMesh.blendShapeCount; i++) dict[smr.sharedMesh.GetBlendShapeName(i)] = smr.GetBlendShapeWeight(i);
-                baseShapeKeyBackup[path] = dict;
+                baseShapeKeyBackup[smrPathCache[smr]] = dict;
             }
         }
 
@@ -1303,8 +946,7 @@ public class VRC_ExpressionEditor : EditorWindow
         Component descriptor = rootObject.GetComponents<Component>().FirstOrDefault(c => c != null && c.GetType().Name == "VRCAvatarDescriptor");
         if (descriptor != null)
         {
-            SerializedObject so = new SerializedObject(descriptor);
-            SerializedProperty baseLayers = so.FindProperty("baseAnimationLayers");
+            SerializedProperty baseLayers = new SerializedObject(descriptor).FindProperty("baseAnimationLayers");
             if (baseLayers != null)
                 for (int i = 0; i < baseLayers.arraySize; i++)
                 {
@@ -1320,52 +962,22 @@ public class VRC_ExpressionEditor : EditorWindow
         if (loadFromSettings && entry != null)
         {
             manuallyCreatedClips.Clear();
-            foreach (var path in entry.manualClipPaths)
-            {
-                if (!string.IsNullOrEmpty(path))
-                {
-                    AnimationClip clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
-                    if (clip != null && !manuallyCreatedClips.Contains(clip)) manuallyCreatedClips.Add(clip);
-                }
-            }
-
-            if (!string.IsNullOrEmpty(entry.lastReferenceClipPath))
-            {
-                referenceClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(entry.lastReferenceClipPath);
-            }
-            else
-            {
-                referenceClip = null;
-            }
-
-            favoriteShapes.Clear();
-            if (entry.favoriteShapes != null)
-            {
-                foreach (var fav in entry.favoriteShapes) favoriteShapes.Add(fav);
-            }
-
-            autoLinkShapeKeys = entry.autoLinkShapeKeys;
-            isMirroringEnabled = entry.isMirroringEnabled;
-
-            detailFilterWords.Clear();
-            if (entry.filterWords != null) detailFilterWords.AddRange(entry.filterWords);
-            detailFilterActives.Clear();
-            if (entry.filterActives != null) detailFilterActives.AddRange(entry.filterActives);
+            foreach (var path in entry.manualClipPaths) { AnimationClip clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(path); if (clip != null && !manuallyCreatedClips.Contains(clip)) manuallyCreatedClips.Add(clip); }
+            referenceClip = string.IsNullOrEmpty(entry.lastReferenceClipPath) ? null : AssetDatabase.LoadAssetAtPath<AnimationClip>(entry.lastReferenceClipPath);
+            favoriteShapes.Clear(); if (entry.favoriteShapes != null) foreach (var fav in entry.favoriteShapes) favoriteShapes.Add(fav);
+            autoLinkShapeKeys = entry.autoLinkShapeKeys; isMirroringEnabled = entry.isMirroringEnabled;
+            detailFilterWords.Clear(); if (entry.filterWords != null) detailFilterWords.AddRange(entry.filterWords);
+            detailFilterActives.Clear(); if (entry.filterActives != null) detailFilterActives.AddRange(entry.filterActives);
+            if (!string.IsNullOrEmpty(entry.lastClipPath)) prevClipName = System.IO.Path.GetFileNameWithoutExtension(entry.lastClipPath);
         }
 
         if (settingsAsset != null)
         {
-            isFilterWindowOpen = settingsAsset.isFilterWindowOpen;
-            filterPanelWidth = settingsAsset.filterPanelWidth;
+            isFilterWindowOpen = settingsAsset.isFilterWindowOpen; filterPanelWidth = settingsAsset.filterPanelWidth;
             if (filterPanelWidth < 100f) filterPanelWidth = 150f;
         }
 
-        // 🟢 追加：アバターのセーブデータ読込後、もしフィルターが空なら1個だけ初期枠を用意する
-        if (detailFilterWords.Count == 0)
-        {
-            detailFilterWords.Add("");
-            detailFilterActives.Add(true);
-        }
+        if (detailFilterWords.Count == 0) { detailFilterWords.Add(""); detailFilterActives.Add(true); }
 
         selectedLayers = new bool[layerNames.Count];
         for (int i = 0; i < selectedLayers.Length; i++)
@@ -1377,26 +989,17 @@ public class VRC_ExpressionEditor : EditorWindow
 
         UpdateAvailableClips();
 
-        if (loadFromSettings && entry != null)
-        {
-            int cIdx = availableClips.FindIndex(c => AssetDatabase.GetAssetPath(c) == entry.lastClipPath); if (cIdx != -1) selectedClipIndex = cIdx;
-            int sIdx = availableSmrs.FindIndex(s => s.name == entry.lastSmrName); if (sIdx != -1) selectedSmrIndex = sIdx;
-        }
-        else
-        {
-            selectedSmrIndex = 0; if (!string.IsNullOrEmpty(prevSmr)) { int i = availableSmrs.FindIndex(s => s.name == prevSmr); if (i != -1) selectedSmrIndex = i; }
-            selectedClipIndex = 0; if (!string.IsNullOrEmpty(prevClip)) { int i = availableClips.FindIndex(c => c.name == prevClip); if (i != -1) selectedClipIndex = i; }
-        }
+        selectedSmrIndex = 0;
+        if (loadFromSettings && entry != null) { int sIdx = availableSmrs.FindIndex(s => s.name == entry.lastSmrName); if (sIdx != -1) selectedSmrIndex = sIdx; }
+        else if (!string.IsNullOrEmpty(prevSmr)) { int i = availableSmrs.FindIndex(s => s.name == prevSmr); if (i != -1) selectedSmrIndex = i; }
 
-        BuildMirrorMap();
-        UpdateCacheArrays();
-        UpdateLayerLabelCache();
-        RefreshExpressionCache();
-        ApplySorting();
+        selectedClipIndex = 0;
+        if (!string.IsNullOrEmpty(prevClipName)) { int i = availableClips.FindIndex(c => c.name == prevClipName); if (i != -1) selectedClipIndex = i; }
+
+        BuildMirrorMap(); UpdateCacheArrays(); UpdateLayerLabelCache(); RefreshExpressionCache(); ApplySorting();
         if (loadFromSettings) SaveCurrentSettings();
 
         if (VRC_ExpressionPreview.Instance != null) { VRC_ExpressionPreview.Instance.FindAndCacheSceneLight(); VRC_ExpressionPreview.Instance.ForceRebuildDummy(); }
-
         isClampBlendShapesEnabledCache = IsClampBlendShapesEnabled();
     }
 
@@ -1406,32 +1009,29 @@ public class VRC_ExpressionEditor : EditorWindow
         if (availableClips.Count <= selectedClipIndex || availableSmrs == null || availableSmrs.Count <= selectedSmrIndex) return;
 
         AnimationClip clip = availableClips[selectedClipIndex];
-
         SkinnedMeshRenderer targetSmr = availableSmrs[selectedSmrIndex];
         string targetPath = smrPathCache.ContainsKey(targetSmr) ? smrPathCache[targetSmr] : GetRelativePath(targetSmr.gameObject);
-
         GameObject dummy = VRC_ExpressionPreview.Instance?.GetPreviewDummy();
         if (dummy != null) clip.SampleAnimation(dummy, 0f);
 
-        var bindings = AnimationUtility.GetCurveBindings(clip);
-        foreach (var binding in bindings)
+        foreach (var binding in AnimationUtility.GetCurveBindings(clip))
         {
             if (binding.type == typeof(SkinnedMeshRenderer) && binding.propertyName.StartsWith("blendShape."))
             {
-                string name = binding.propertyName.Replace("blendShape.", "");
-                float val = 0f; bool fetched = false;
+                string name = binding.propertyName.Replace("blendShape.", ""); float val = 0f; bool fetched = false;
                 AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
                 if (curve != null && curve.keys.Length > 0) { val = curve.keys[0].value; fetched = true; }
 
                 if (!fetched && dummy != null)
                 {
                     Transform t = string.IsNullOrEmpty(binding.path) ? dummy.transform : dummy.transform.Find(binding.path);
-                    if (t != null) { var smr = t.GetComponent<SkinnedMeshRenderer>(); if (smr != null && smr.sharedMesh != null) { int idx = smr.sharedMesh.GetBlendShapeIndex(name); if (idx != -1) { val = smr.GetBlendShapeWeight(idx); fetched = true; } } }
+                    if (t != null && t.GetComponent<SkinnedMeshRenderer>() is SkinnedMeshRenderer smr && smr.sharedMesh != null)
+                    {
+                        int idx = smr.sharedMesh.GetBlendShapeIndex(name); if (idx != -1) { val = smr.GetBlendShapeWeight(idx); fetched = true; }
+                    }
                 }
-
                 if (!clipExpressionValues.ContainsKey(binding.path)) clipExpressionValues[binding.path] = new Dictionary<string, float>();
                 clipExpressionValues[binding.path][name] = val;
-
                 if (binding.path == targetPath) { currentExpressionValues[name] = val; registeredShapeKeys.Add(name); }
             }
             else if (binding.type == typeof(GameObject) && binding.propertyName == "m_IsActive")
@@ -1445,11 +1045,7 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void RecalculateObjNameWidth()
     {
-        cachedMaxObjNameWidth = 75f;
-        GUIStyle labelStyle = new GUIStyle(EditorStyles.label);
-
-        cachedActiveObjects.Clear();
-
+        cachedMaxObjNameWidth = 75f; GUIStyle labelStyle = new GUIStyle(EditorStyles.label); cachedActiveObjects.Clear();
         foreach (var kvp in activeObjectValues)
         {
             string path = kvp.Key;
@@ -1467,7 +1063,8 @@ public class VRC_ExpressionEditor : EditorWindow
     public void UpdateAvailableClips()
     {
         if (rootObject == null) return;
-        AnimationClip lastClip = (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0) ? availableClips[selectedClipIndex] : null;
+
+        string lastClipName = (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0) ? availableClips[selectedClipIndex].name : "";
         HashSet<AnimationClip> clipSet = new HashSet<AnimationClip>();
 
         int layerIdx = 0;
@@ -1483,7 +1080,14 @@ public class VRC_ExpressionEditor : EditorWindow
 
         foreach (var mClip in manuallyCreatedClips) if (mClip != null) clipSet.Add(mClip);
         availableClips = clipSet.Where(c => c != null).Distinct().OrderBy(c => c.name).ToList();
-        selectedClipIndex = (lastClip != null && availableClips.Contains(lastClip)) ? availableClips.IndexOf(lastClip) : 0;
+
+        selectedClipIndex = 0;
+        if (!string.IsNullOrEmpty(lastClipName))
+        {
+            int foundIdx = availableClips.FindIndex(c => c.name == lastClipName);
+            if (foundIdx != -1) selectedClipIndex = foundIdx;
+        }
+
         UpdateCacheArrays();
         Repaint();
     }

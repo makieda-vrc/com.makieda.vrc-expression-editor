@@ -28,7 +28,6 @@ public class ExpressionEditorSettings : ScriptableObject
     public bool isFilterWindowOpen = false;
     public float filterPanelWidth = 150f;
 
-    // 🟢 追加：前回選択していたアバターの名前をグローバルに記憶
     public string lastAvatarName = "";
 
     public ExpressionSettingEntry GetEntry(string guid) => settings.Find(x => x.fxGuid == guid);
