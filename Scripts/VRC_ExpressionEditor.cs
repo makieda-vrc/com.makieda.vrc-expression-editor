@@ -90,6 +90,7 @@ public class VRC_ExpressionEditor : EditorWindow
     private GUIContent cachedFavOffContent;
     private GUIContent warnIconContent;
     private GUIContent trashIconContent;
+    private GUIContent gridIconContent; // ★サムネ一覧トグルアイコン用
     private GUIContent createIconContent;
     private GUIContent openIconContent;
     private GUIContent linkIconContent;
@@ -170,7 +171,18 @@ public class VRC_ExpressionEditor : EditorWindow
         EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
         UnityEditor.SceneManagement.EditorSceneManager.sceneOpened -= OnSceneOpened;
 
+        // ★修正：再生時の誤クローズを防ぐため、OnDisableでの連動クローズ処理は廃止し、OnDestroy（物理破棄）へ移動しました
+
         SaveCurrentSettings();
+    }
+
+    // ★追加：ウィンドウが「✕」ボタンで完全に物理破棄された時のみ、連動して閉じます
+    private void OnDestroy()
+    {
+        if (VRC_ExpressionThumbnailWindow.Instance != null)
+        {
+            VRC_ExpressionThumbnailWindow.Instance.Close();
+        }
     }
 
     private void OnPlayModeStateChanged(PlayModeStateChange state)
@@ -246,7 +258,7 @@ public class VRC_ExpressionEditor : EditorWindow
         }
     }
 
-    private string GetAvatarID()
+    public string GetAvatarID()
     {
         if (rootObject == null) return "";
         Component descriptor = rootObject.GetComponents<Component>().FirstOrDefault(c => c != null && c.GetType().Name == "VRCAvatarDescriptor");
@@ -339,6 +351,7 @@ public class VRC_ExpressionEditor : EditorWindow
             cachedFavOffContent = new GUIContent("☆", "ピン留め");
             warnIconContent = EditorGUIUtility.IconContent("console.warnIcon"); warnIconContent.tooltip = "警告: 複数フレームを持っています。\nスライダーを動かすと1F目に上書きされます！";
             trashIconContent = EditorGUIUtility.IconContent("TreeEditor.Trash"); trashIconContent.tooltip = "このアニメを編集リストから除外する";
+            gridIconContent = EditorGUIUtility.IconContent("d_Mesh Icon"); gridIconContent.tooltip = "表情サムネイル一覧を開く";
             createIconContent = EditorGUIUtility.IconContent("Toolbar Plus"); createIconContent.tooltip = "新規表情アニメを作成";
             openIconContent = EditorGUIUtility.IconContent("FolderOpened Icon"); openIconContent.tooltip = "既存のアニメーションを開く";
             linkIconContent = EditorGUIUtility.IconContent("Linked"); linkIconContent.tooltip = "別メッシュ同名シェイプ連動";
@@ -421,7 +434,7 @@ public class VRC_ExpressionEditor : EditorWindow
         if (layerNames == null) layerNames = new List<string>();
         if (selectedLayers == null) selectedLayers = new bool[0];
         if (detailFilterWords == null) detailFilterWords = new List<string>();
-        if (detailFilterActives == null) detailFilterActives = new List<bool>();
+        if (detailFilterActives == null) detailFilterActives = new List<bool>(); // ★等価比較(==)に修正
         if (sortedShapeKeyNames == null) sortedShapeKeyNames = new List<string>();
         if (cachedShapeContents == null) cachedShapeContents = new GUIContent[0];
         if (cachedActiveObjects == null) cachedActiveObjects = new List<ActiveObjectCache>();
@@ -523,6 +536,18 @@ public class VRC_ExpressionEditor : EditorWindow
                 GUI.backgroundColor = prevColor;
             }
         }
+
+        // ★追加箇所：ゴミ箱と新規作成の間に「グリッドアイコン（サムネ一覧）」ボタンを配置
+        bool isThumbWindowOpen = VRC_ExpressionThumbnailWindow.Instance != null;
+        if (isThumbWindowOpen) GUI.backgroundColor = new Color(0.7f, 0.9f, 1f); // 開いている時は青っぽくハイライト
+        if (GUILayout.Button(gridIconContent, optW24, optH18))
+        {
+            if (isThumbWindowOpen)
+                VRC_ExpressionThumbnailWindow.Instance.Close();
+            else
+                VRC_ExpressionThumbnailWindow.OpenWindow();
+        }
+        GUI.backgroundColor = Color.white;
 
         if (GUILayout.Button(createIconContent, optW24, optH18)) CreateNewAnimationClip();
         if (GUILayout.Button(openIconContent, optW24, optH18))
@@ -732,7 +757,7 @@ public class VRC_ExpressionEditor : EditorWindow
         {
             foreach (var smr in availableSmrs)
             {
-                if (smr == mainSmr || smr.sharedMesh == null) continue;
+                if (smr == mainSmr || smr.sharedMesh != null) continue;
                 if (smr.sharedMesh.GetBlendShapeIndex(shapeName) != -1)
                 {
                     string path = smrPathCache.ContainsKey(smr) ? smrPathCache[smr] : GetRelativePath(smr.gameObject);
@@ -760,7 +785,7 @@ public class VRC_ExpressionEditor : EditorWindow
         {
             foreach (var smr in availableSmrs)
             {
-                if (smr == mainSmr || smr.sharedMesh == null) continue;
+                if (smr == mainSmr || smr.sharedMesh != null) continue;
                 if (smr.sharedMesh.GetBlendShapeIndex(shapeName) != -1)
                 {
                     string path = smrPathCache.ContainsKey(smr) ? smrPathCache[smr] : GetRelativePath(smr.gameObject);
@@ -1019,7 +1044,7 @@ public class VRC_ExpressionEditor : EditorWindow
             if (binding.type == typeof(SkinnedMeshRenderer) && binding.propertyName.StartsWith("blendShape."))
             {
                 string name = binding.propertyName.Replace("blendShape.", ""); float val = 0f; bool fetched = false;
-                AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
+                AnimationCurve curve = EditorCurveBinding.FloatCurve(binding.path, binding.type, binding.propertyName) == null ? null : AnimationUtility.GetEditorCurve(clip, binding);
                 if (curve != null && curve.keys.Length > 0) { val = curve.keys[0].value; fetched = true; }
 
                 if (!fetched && dummy != null)

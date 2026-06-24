@@ -30,6 +30,9 @@ public class ExpressionEditorSettings : ScriptableObject
 
     public string lastAvatarName = "";
 
+    // ★追加：サムネイルウィンドウの表示サイズ設定（1 = x1: 128px, 2 = x2: 256px）
+    public int thumbnailSizeScale = 1;
+
     public ExpressionSettingEntry GetEntry(string guid) => settings.Find(x => x.fxGuid == guid);
 
     public void SaveEntry(string guid, string clipPath, string smrName, bool[] selectedLayers, List<string> manualClips, string refClipPath, List<string> favShapes, bool autoLink, bool isMirror, List<string> fWords, List<bool> fActives)

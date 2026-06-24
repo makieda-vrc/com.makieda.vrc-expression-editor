@@ -13,7 +13,7 @@ public class VRC_ExpressionPreview : EditorWindow
     // カメラのピボット（原点配置アプローチにより、バグのない安定した初期値に固定）
     private Vector3 cameraPivot = new Vector3(0, 1.5f, 0);
     private Vector3 cameraEuler = new Vector3(0, 180, 0);
-    private float cameraDistance = 0.5f;
+    private float cameraDistance = 0.40f; // 0.5f から 0.40f に変更（顔に近づけます）
 
     private Vector3 savedHeadLocalPosition = new Vector3(0, 1.4f, 0);
     private AnimationClip cachedTestBaseClip;
@@ -37,7 +37,7 @@ public class VRC_ExpressionPreview : EditorWindow
         public Vector3 lastPosition;
         public Quaternion lastRotation;
 
-        public LightType lastType; // ★この1行を追加
+        public LightType lastType;
 
         public Color lastColor;
         public float lastIntensity;
@@ -87,6 +87,8 @@ public class VRC_ExpressionPreview : EditorWindow
     private GUILayoutOption optH20, optH26, optExpandTrue;
 
     private GUIStyle centerLockStyle;
+
+    private string pendingCapturePath = null; // 撮影要求用パス
 
     private void OnEnable()
     {
@@ -145,7 +147,7 @@ public class VRC_ExpressionPreview : EditorWindow
         // 【極限軽量化】ドラッグ操作中は0.1秒の同期処理すら完全に停止
         if (editor.IsDraggingSlider()) return;
 
-        // 1. 0.1秒に1回、ライトの構成変更チェック（Dictionary化によりシーン内の複製は無視されるため超高速）
+        // 1. 0.1秒に1回、ライトの構成変更チェック
         if (replicaLightsNeedRebuild || CheckLightConfigurationChanged())
         {
             RebuildReplicaLights(editor);
@@ -153,7 +155,7 @@ public class VRC_ExpressionPreview : EditorWindow
         }
         else
         {
-            // 2. 0.1秒に1回、追加ライト（Point/Spot）の値を同期（変更がある時のみ書き込み）
+            // 2. 0.1秒に1回、追加ライト（Point/Spot）の値を同期
             if (SyncReplicaLightParameters())
             {
                 Repaint();
@@ -172,7 +174,6 @@ public class VRC_ExpressionPreview : EditorWindow
             UnityEngine.Light l = allLights[i];
             if (l == null) continue;
 
-            // 複製ライト（"Replica_"から始まる一時ライト）をスキャンから確実に除外
             if (l.name.StartsWith("Replica_")) continue;
 
             sceneLights.Add(l);
@@ -203,9 +204,6 @@ public class VRC_ExpressionPreview : EditorWindow
         return false;
     }
 
-    /// <summary>
-    /// 【ハイブリッド構築】ライトレプリカを構築します（低頻度：ライト構成変化時のみ実行）
-    /// </summary>
     private void RebuildReplicaLights(VRC_ExpressionEditor editor)
     {
         CleanupReplicaLights();
@@ -243,7 +241,6 @@ public class VRC_ExpressionPreview : EditorWindow
 
         dirLights.Sort((a, b) => b.intensity.CompareTo(a.intensity));
 
-        // 1. 【影あり優先】Directional Light (最大2灯) を内蔵ライトに登録
         for (int i = 0; i < 2; i++)
         {
             if (i < dirLights.Count)
@@ -256,7 +253,6 @@ public class VRC_ExpressionPreview : EditorWindow
             }
         }
 
-        // 2. 【影なし】Point/Spot などの追加ライトを複製生成
         int otherCount = otherLights.Count;
         for (int i = 0; i < otherCount; i++)
         {
@@ -265,13 +261,11 @@ public class VRC_ExpressionPreview : EditorWindow
             GameObject lightGo = new GameObject("Replica_" + srcLight.name);
             lightGo.transform.SetParent(previewLightsRoot.transform);
 
-            // アバター相対位置（以前通り綺麗に光が当たります）
             lightGo.transform.position = srcLight.transform.position - avatarPos;
             lightGo.transform.rotation = srcLight.transform.rotation;
 
             UnityEngine.Light destLight = lightGo.AddComponent<UnityEngine.Light>();
 
-            // 影は強制的に None にして落影の競合（チカチカ）を100%防止
             CopyLightParameters(srcLight, destLight);
             destLight.shadows = LightShadows.None;
 
@@ -303,9 +297,6 @@ public class VRC_ExpressionPreview : EditorWindow
         replicaLightsNeedRebuild = false;
     }
 
-    /// <summary>
-    /// 【0.1秒周期】追加ライト（Point/Spot）のパラメータ・トランスフォームの同期（変化時のみ書き込み）
-    /// </summary>
     private bool SyncReplicaLightParameters()
     {
         bool anyChanged = false;
@@ -323,7 +314,6 @@ public class VRC_ExpressionPreview : EditorWindow
             UnityEngine.Light src = pair.original;
             UnityEngine.Light dest = pair.replica;
 
-            // ① トランスフォーム同期（動いた時のみ書き込み）
             if (src.transform.position != pair.lastPosition || src.transform.rotation != pair.lastRotation)
             {
                 dest.transform.position = src.transform.position - avatarPos;
@@ -333,7 +323,6 @@ public class VRC_ExpressionPreview : EditorWindow
                 anyChanged = true;
             }
 
-            // ② パラメータ同期（値が変化した時のみ書き込み）
             bool paramChanged = false;
             if (src.type != pair.lastType) { dest.type = src.type; pair.lastType = src.type; paramChanged = true; }
             if (src.color != pair.lastColor) { dest.color = src.color; pair.lastColor = src.color; paramChanged = true; }
@@ -351,9 +340,6 @@ public class VRC_ExpressionPreview : EditorWindow
         return anyChanged;
     }
 
-    /// <summary>
-    /// 【毎フレーム（OnGUI）】BeginPreviewのリセット対策として、最小限の内蔵ライト（Directional最大2灯）のみを同期します
-    /// </summary>
     private void SyncBuiltinLightsImmediate()
     {
         if (previewUtility == null) return;
@@ -373,7 +359,6 @@ public class VRC_ExpressionPreview : EditorWindow
                     dest.enabled = true;
                     dest.transform.rotation = sync.original.transform.rotation;
 
-                    // 内蔵ライトが許容する最小限のパラメータのみ同期（余計な type の書き換え等は行わず高速処理）
                     dest.color = sync.original.color;
                     dest.intensity = sync.original.intensity;
                     dest.shadows = sync.original.shadows;
@@ -391,7 +376,6 @@ public class VRC_ExpressionPreview : EditorWindow
                 }
                 else
                 {
-                    // 2灯目が余っていれば「本物の環境光（Ambient）」として機能させる
                     dest.enabled = true;
                     dest.type = LightType.Directional;
                     dest.color = cachedAmbientColor;
@@ -559,20 +543,25 @@ public class VRC_ExpressionPreview : EditorWindow
 
             previewUtility.BeginPreview(rect, GUIStyle.none);
 
-            // ★ BeginPreview された直後のリセットされた内蔵ライトを、ここで「毎フレーム安全に強制上書き」
             SyncBuiltinLightsImmediate();
 
             if (previewDummy != null)
             {
                 previewUtility.AddSingleGO(previewDummy);
 
-                // 親の lightsRoot を AddSingleGO することで、複製された Point/Spot ライトが一斉に光ります
                 if (previewLightsRoot != null)
                 {
                     previewUtility.AddSingleGO(previewLightsRoot);
                 }
 
                 previewUtility.camera.Render();
+
+                // 完全に保持されている、BeginPreview ～ EndPreview の「内側」で撮影を実行
+                if (!string.IsNullOrEmpty(pendingCapturePath))
+                {
+                    CaptureCurrentPreviewInsideRenderLoop(pendingCapturePath);
+                    pendingCapturePath = null;
+                }
             }
             Texture rTex = previewUtility.EndPreview();
             if (rTex != null) GUI.DrawTexture(rect, rTex, ScaleMode.StretchToFill, false);
@@ -627,7 +616,6 @@ public class VRC_ExpressionPreview : EditorWindow
             SyncTransformsAndActive(editor.rootObject.transform, previewDummy.transform, true);
             StripAllUnwantedComponents(previewDummy);
 
-            // アバター自体は常に原点 (0,0,0) に美しく静止させます（カメラガタつき防止）
             previewDummy.transform.position = Vector3.zero;
             previewDummy.transform.rotation = Quaternion.identity;
 
@@ -718,7 +706,7 @@ public class VRC_ExpressionPreview : EditorWindow
     {
         cameraPivot = savedHeadLocalPosition + Vector3.up * 0.05f;
         cameraEuler = new Vector3(0, 180, 0);
-        cameraDistance = 0.5f;
+        cameraDistance = 0.40f; // 0.5f から 0.40f に変更（リセット時のカメラ距離）
         MarkPreviewDirty();
     }
 
@@ -984,6 +972,85 @@ public class VRC_ExpressionPreview : EditorWindow
             importer.mipmapEnabled = false; importer.alphaIsTransparency = true; importer.SaveAndReimport();
         }
         AssetDatabase.Refresh();
+    }
+
+    /// <summary>
+    /// 一覧用の撮影リクエストを受け付け、次のRepaintの適切なタイミングで処理を要求します。
+    /// </summary>
+    public void RequestCapture(string path)
+    {
+        pendingCapturePath = path;
+        MarkPreviewDirty();
+        Repaint();
+    }
+
+    /// <summary>
+    /// ★修正：BeginPreview ～ EndPreview のレンダリングサイクル「内側」で動作し、
+    /// 新しくアバター階層のサブフォルダーが追加されても物理フォルダを安全に自動生成し、
+    /// 絶対パス（Application.dataPathベース）を用いて100%クラッシュなく保存を行います。
+    /// </summary>
+    private void CaptureCurrentPreviewInsideRenderLoop(string savePath)
+    {
+        var cam = previewUtility.camera;
+        int size = 256; // 128から256に拡張（美しく縮小表示させるため）
+        RenderTexture rt = new RenderTexture(size, size, 24, RenderTextureFormat.ARGB32);
+
+        var oldTarget = cam.targetTexture;
+        var oldClearFlags = cam.clearFlags;
+        var oldBgColor = cam.backgroundColor;
+
+        cam.targetTexture = rt;
+        cam.clearFlags = CameraClearFlags.SolidColor;
+        cam.backgroundColor = new Color(0, 0, 0, 0); // 透過
+
+        cam.Render();
+
+        RenderTexture.active = rt;
+        Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        tex.ReadPixels(new Rect(0, 0, size, size), 0, 0);
+        tex.Apply();
+
+        RenderTexture.active = null;
+        cam.targetTexture = oldTarget;
+        cam.clearFlags = oldClearFlags;
+        cam.backgroundColor = oldBgColor;
+        DestroyImmediate(rt);
+
+        // ★絶対パスをOS基準のフルパスに100%安全に統一します
+        string absolutePath = System.IO.Path.GetFullPath(Application.dataPath + savePath.Substring("Assets".Length));
+
+        // ★親フォルダの物理的な存在を保証（自動生成）
+        string directory = System.IO.Path.GetDirectoryName(absolutePath);
+        if (!System.IO.Directory.Exists(directory))
+        {
+            System.IO.Directory.CreateDirectory(directory);
+
+            // ★超重要：Unity側に、新規作成された「親フォルダアセット」自体の存在を登録（インポート同期）させます。
+            // これがないと、フォルダ作成直後の AssetDatabase.ImportAsset(savePath) が空振りに終わります。
+            string relativeDir = System.IO.Path.GetDirectoryName(savePath).Replace("\\", "/");
+            AssetDatabase.ImportAsset(relativeDir);
+        }
+
+        // 絶対パスへ物理書き出し
+        System.IO.File.WriteAllBytes(absolutePath, tex.EncodeToPNG());
+        DestroyImmediate(tex);
+
+        // Unityへのインポート通知は相対パスで行う
+        AssetDatabase.ImportAsset(savePath);
+        if (AssetImporter.GetAtPath(savePath) as TextureImporter is TextureImporter importer)
+        {
+            importer.textureType = TextureImporterType.Sprite;
+            importer.spriteImportMode = SpriteImportMode.Single;
+            importer.mipmapEnabled = false;
+            importer.alphaIsTransparency = true;
+            importer.SaveAndReimport();
+        }
+        AssetDatabase.Refresh();
+
+        if (VRC_ExpressionThumbnailWindow.Instance != null)
+        {
+            VRC_ExpressionThumbnailWindow.Instance.OnCaptureComplete();
+        }
     }
 
     private void InitializePreviewUtilityIfNeeded()
