@@ -27,12 +27,14 @@ public class VRC_ExpressionPreview : EditorWindow
     }
     private List<MeshPair> cachedMeshPairs = new List<MeshPair>();
 
-    private Light cachedSceneLight;
-    private double lastLightCheckTime;
+    // --- 複数ライト・最適化用の変数 ---
+    private bool isWindowVisible = true;
+    private List<Light> activeSceneLights = new List<Light>();
+    private List<GameObject> previewDummyLights = new List<GameObject>();
+    private struct LightState { public Vector3 pos; public Quaternion rot; public Color col; public float intensity; }
+    private List<LightState> lastLightStates = new List<LightState>();
     private Color cachedAmbientColor = Color.gray;
-    private Quaternion lastLightRot;
-    private Color lastLightColor;
-    private float lastLightIntensity;
+    private double lastLightCheckTime;
 
     private bool isAvatarChanged = true;
     private bool isDirty = true;
@@ -57,26 +59,50 @@ public class VRC_ExpressionPreview : EditorWindow
     private GUIContent resizeIconContent;
     private GUILayoutOption optW28, optW45, optW65;
     private GUILayoutOption optH20, optH26, optExpandTrue;
-
     private GUIStyle centerLockStyle;
+
+    private bool hierarchyChangedFlag = false; // ← これを追加
 
     private void OnEnable()
     {
         Instance = this;
         isDirty = true;
         EditorApplication.update += OnEditorUpdate;
+        EditorApplication.hierarchyChanged += OnHierarchyChanged; // ← これを追加
     }
 
     private void OnDisable()
     {
         EditorApplication.update -= OnEditorUpdate;
+        EditorApplication.hierarchyChanged -= OnHierarchyChanged; // ← これを追加
         CleanupPreview();
         if (previewUtility != null) { previewUtility.Cleanup(); previewUtility = null; }
+    }
+
+    // ↓ このメソッドをまるごと追加
+    private void OnHierarchyChanged()
+    {
+        hierarchyChangedFlag = true;
+    }
+
+    // タブが表示された瞬間
+    private void OnBecameVisible()
+    {
+        isWindowVisible = true;
+        if (isDirty) Repaint();
+    }
+
+    // タブが裏に隠れた瞬間（負荷ゼロ化）
+    private void OnBecameInvisible()
+    {
+        isWindowVisible = false;
     }
 
     private void CleanupPreview()
     {
         if (previewDummy != null) { DestroyImmediate(previewDummy); previewDummy = null; }
+        foreach (var l in previewDummyLights) if (l != null) DestroyImmediate(l);
+        previewDummyLights.Clear();
         cachedMeshPairs.Clear();
     }
 
@@ -85,21 +111,47 @@ public class VRC_ExpressionPreview : EditorWindow
     private void OnEditorUpdate()
     {
         if (EditorApplication.isPlayingOrWillChangePlaymode) return;
+        var editor = VRC_ExpressionEditor.Instance;
+        if (editor == null) { this.Close(); return; }
 
-        if (VRC_ExpressionEditor.Instance == null) { this.Close(); return; }
+        if (!isWindowVisible) return;
 
         double timeSinceStartup = EditorApplication.timeSinceStartup;
-        if (timeSinceStartup - lastLightCheckTime < 0.1) return;
+        if (timeSinceStartup - lastLightCheckTime < 0.2) return;
         lastLightCheckTime = timeSinceStartup;
 
-        if (cachedSceneLight == null) return;
-
         bool lightChanged = false;
-        if (cachedSceneLight.transform.rotation != lastLightRot) { lightChanged = true; lastLightRot = cachedSceneLight.transform.rotation; }
-        if (cachedSceneLight.color != lastLightColor) { lightChanged = true; lastLightColor = cachedSceneLight.color; }
-        if (cachedSceneLight.intensity != lastLightIntensity) { lightChanged = true; lastLightIntensity = cachedSceneLight.intensity; }
 
-        if (lightChanged) Repaint();
+        // ★ シーンに新しいオブジェクトが追加・削除された通知が来ていたら、無条件でライト名簿を作り直す
+        if (hierarchyChangedFlag)
+        {
+            hierarchyChangedFlag = false;
+            lightChanged = true;
+        }
+        else
+        {
+            // 既存のライトの変化を監視
+            for (int i = 0; i < activeSceneLights.Count; i++)
+            {
+                var l = activeSceneLights[i];
+                // !l.enabled を追加して、コンポーネントのチェックボックスOFFにも即反応するようにしました
+                if (l == null || !l.gameObject.activeInHierarchy || !l.enabled) { lightChanged = true; break; }
+
+                var state = lastLightStates[i];
+                if (l.transform.position != state.pos || l.transform.rotation != state.rot ||
+                    l.color != state.col || l.intensity != state.intensity)
+                {
+                    lightChanged = true; break;
+                }
+            }
+        }
+
+        if (lightChanged)
+        {
+            UpdateSceneLights(editor);
+            MarkPreviewDirty();
+            Repaint();
+        }
     }
 
     public void UpdateSingleBlendShapeImmediate(string relativePath, string shapeName, float value)
@@ -110,9 +162,7 @@ public class VRC_ExpressionPreview : EditorWindow
             if (pair.relativePath == relativePath)
             {
                 if (pair.shapeIndexMap.TryGetValue(shapeName, out int index))
-                {
                     pair.dummySmr.SetBlendShapeWeight(index, value);
-                }
                 break;
             }
         }
@@ -129,12 +179,77 @@ public class VRC_ExpressionPreview : EditorWindow
     public void ForceRebuildDummy() { CleanupPreview(); MarkPreviewDirty(); Repaint(); }
     public GameObject GetPreviewDummy() { return previewDummy; }
 
-    public void FindAndCacheSceneLight()
+    // 最大8個のライトを抽出してプレビュー空間に反映
+    public void UpdateSceneLights(VRC_ExpressionEditor editor)
     {
-        cachedSceneLight = null;
-        var lights = FindObjectsOfType<Light>();
-        if (lights != null) cachedSceneLight = lights.FirstOrDefault(x => x.type == LightType.Directional);
+        activeSceneLights.Clear();
+        lastLightStates.Clear();
+        if (editor == null || editor.rootObject == null) return;
+
+#if UNITY_2023_1_OR_NEWER || UNITY_2022_3_OR_NEWER
+        var allLights = FindObjectsByType<Light>(FindObjectsSortMode.None);
+#else
+        var allLights = FindObjectsOfType<Light>();
+#endif
+        Vector3 avatarPos = editor.rootObject.transform.position;
+
+        // ディレクショナルを優先しつつ、アバターに近いポイントライト等を抽出（最大8個）
+        var sortedLights = allLights
+            .Where(l => l.isActiveAndEnabled && l.gameObject.activeInHierarchy && l.intensity > 0)
+            .OrderByDescending(l => l.type == LightType.Directional ? 1 : 0)
+            .ThenBy(l => Vector3.Distance(avatarPos, l.transform.position))
+            .Take(8)
+            .ToList();
+
+        // もしシーンに全くライトが無い場合は、安全のためデフォルト環境光を適用
+        if (sortedLights.Count == 0 && RenderSettings.sun != null)
+        {
+            sortedLights.Add(RenderSettings.sun);
+        }
+
+        activeSceneLights.AddRange(sortedLights);
+
+        foreach (var l in activeSceneLights)
+        {
+            if (l != null) lastLightStates.Add(new LightState { pos = l.transform.position, rot = l.transform.rotation, col = l.color, intensity = l.intensity });
+        }
+
         cachedAmbientColor = RenderSettings.ambientLight;
+        RebuildPreviewDummyLights(editor);
+    }
+
+    private void RebuildPreviewDummyLights(VRC_ExpressionEditor editor)
+    {
+        while (previewDummyLights.Count > activeSceneLights.Count)
+        {
+            int lastIdx = previewDummyLights.Count - 1;
+            DestroyImmediate(previewDummyLights[lastIdx]);
+            previewDummyLights.RemoveAt(lastIdx);
+        }
+        while (previewDummyLights.Count < activeSceneLights.Count)
+        {
+            GameObject dummyObj = new GameObject("PreviewLightDummy");
+            dummyObj.hideFlags = HideFlags.HideAndDontSave;
+            dummyObj.AddComponent<Light>();
+            previewDummyLights.Add(dummyObj);
+        }
+
+        for (int i = 0; i < activeSceneLights.Count; i++)
+        {
+            var sLight = activeSceneLights[i];
+            if (sLight == null) continue;
+            var dLight = previewDummyLights[i].GetComponent<Light>();
+
+            dLight.type = sLight.type;
+            dLight.color = sLight.color;
+            dLight.intensity = sLight.intensity;
+            dLight.range = sLight.range;
+            dLight.spotAngle = sLight.spotAngle;
+
+            // アバターから見た相対座標・回転に変換し、プレビュー空間へ配置
+            previewDummyLights[i].transform.position = editor.rootObject.transform.InverseTransformPoint(sLight.transform.position);
+            previewDummyLights[i].transform.rotation = Quaternion.Inverse(editor.rootObject.transform.rotation) * sLight.transform.rotation;
+        }
     }
 
     private void BuildMeshPairsCache(VRC_ExpressionEditor editor)
@@ -185,7 +300,6 @@ public class VRC_ExpressionPreview : EditorWindow
 
     private void InitializeGUIStylesIfNeeded()
     {
-        // 修正：確実なnullチェック（optExpandTrue）を入れてGUIエラーを防ぐ
         if (resizeIconContent == null || optExpandTrue == null)
         {
             resizeIconContent = EditorGUIUtility.IconContent("d_ViewToolZoom");
@@ -207,9 +321,9 @@ public class VRC_ExpressionPreview : EditorWindow
 
     private void OnGUI()
     {
+        isWindowVisible = true; // OnGUIが呼ばれたら可視状態
         InitializeGUIStylesIfNeeded();
 
-        // 修正：再生モード中は重い処理を止め、中央にメッセージのみを表示する
         if (EditorApplication.isPlayingOrWillChangePlaymode)
         {
             GUILayout.FlexibleSpace();
@@ -222,18 +336,18 @@ public class VRC_ExpressionPreview : EditorWindow
 
         var editor = VRC_ExpressionEditor.Instance;
         if (editor == null || editor.rootObject == null) { EditorGUILayout.HelpBox("アバターを設定してください。", MessageType.Info); CleanupPreview(); return; }
-        if (editor.rootObject != lastRootObject) { CleanupPreview(); lastRootObject = editor.rootObject; isAvatarChanged = true; FindAndCacheSceneLight(); MarkPreviewDirty(); }
+        if (editor.rootObject != lastRootObject) { CleanupPreview(); lastRootObject = editor.rootObject; isAvatarChanged = true; UpdateSceneLights(editor); MarkPreviewDirty(); }
 
         float cameraHeight = Mathf.Max(150f, position.height - 330f);
         Rect rect = new Rect(10, 10, position.width - 20, cameraHeight);
         EditorGUI.DrawRect(rect, new Color(0.15f, 0.15f, 0.15f, 1f));
 
         HandleCameraControls(rect);
-        SyncSceneLightingToPreview();
 
         if (Event.current.type == EventType.Repaint)
         {
             bool isDraggingNow = GUIUtility.hotControl != 0;
+
             if (!isComparing && !isMuted && ((isDirty && !isDraggingNow) || previewDummy == null))
             {
                 SetupAndPoseDummy(editor);
@@ -246,7 +360,20 @@ public class VRC_ExpressionPreview : EditorWindow
             }
 
             previewUtility.BeginPreview(rect, GUIStyle.none);
-            if (previewDummy != null) { previewUtility.AddSingleGO(previewDummy); previewUtility.camera.Render(); }
+
+            // 環境光として機能するよう標準のライト2を調整（標準ライト1は無効化）
+            previewUtility.lights[0].enabled = false;
+            previewUtility.lights[1].enabled = true;
+            previewUtility.lights[1].color = cachedAmbientColor;
+            previewUtility.lights[1].intensity = 1.0f;
+            previewUtility.lights[1].transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+
+            if (previewDummy != null) previewUtility.AddSingleGO(previewDummy);
+            foreach (var lightObj in previewDummyLights) { if (lightObj != null) previewUtility.AddSingleGO(lightObj); }
+
+            // 無条件でレンダリング
+            previewUtility.camera.Render();
+
             Texture rTex = previewUtility.EndPreview();
             if (rTex != null) GUI.DrawTexture(rect, rTex, ScaleMode.StretchToFill, false);
         }
@@ -303,7 +430,7 @@ public class VRC_ExpressionPreview : EditorWindow
             previewDummy.transform.rotation = Quaternion.identity;
 
             if (isAvatarChanged) { ResetCameraPivot(); isAvatarChanged = false; }
-            FindAndCacheSceneLight();
+            UpdateSceneLights(editor);
             BuildMeshPairsCache(editor);
 
             if (editor.testBaseClip != null) editor.testBaseClip.SampleAnimation(previewDummy, 0f);
@@ -385,28 +512,6 @@ public class VRC_ExpressionPreview : EditorWindow
         if (original == null) return null; string path = editor.GetRelativePath(original.gameObject);
         if (string.IsNullOrEmpty(path)) return parent.GetComponent<SkinnedMeshRenderer>();
         Transform t = parent.transform.Find(path); return t != null ? t.GetComponent<SkinnedMeshRenderer>() : null;
-    }
-
-    private void SyncSceneLightingToPreview()
-    {
-        if (previewUtility == null) return;
-        var sceneLight = cachedSceneLight;
-        if (sceneLight != null && sceneLight.gameObject != null && sceneLight.enabled && sceneLight.gameObject.activeInHierarchy)
-        {
-            previewUtility.lights[0].enabled = true;
-            previewUtility.lights[0].color = sceneLight.color;
-            previewUtility.lights[0].intensity = sceneLight.intensity;
-            previewUtility.lights[0].transform.rotation = sceneLight.transform.rotation;
-        }
-        else
-        {
-            previewUtility.lights[0].enabled = true;
-            previewUtility.lights[0].color = Color.white;
-            previewUtility.lights[0].intensity = 1.0f;
-            previewUtility.lights[0].transform.rotation = Quaternion.Euler(30f, 135f, 0f);
-        }
-        previewUtility.lights[1].color = cachedAmbientColor;
-        previewUtility.lights[1].intensity = 1.0f;
     }
 
     private void SyncTransformsAndActive(Transform src, Transform dst, bool isRoot = true)
@@ -643,7 +748,10 @@ public class VRC_ExpressionPreview : EditorWindow
 
         int size = 256; RenderTexture rt = new RenderTexture(size, size, 24, RenderTextureFormat.ARGB32);
         var oldTarget = cam.targetTexture; cam.targetTexture = rt;
+
+        // アイコン撮影時だけ強制1回レンダリング
         cam.Render();
+
         RenderTexture.active = rt; Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
         tex.ReadPixels(new Rect(0, 0, size, size), 0, 0); tex.Apply();
 

@@ -662,7 +662,6 @@ public class VRC_ExpressionEditor : EditorWindow
         float labelWidth = Mathf.Clamp(viewWidth * 0.40f, 75f, Mathf.Min(cachedMaxShapeNameWidth, labelLimitWidth));
         if (lastShapeLabelW != labelWidth) { lastShapeLabelW = labelWidth; optShapeLabelW = GUILayout.Width(labelWidth); }
 
-        // 追加：再生から戻った際などの配列のサイズ不整合エラーを絶対に防ぐ
         if (cachedShapeContents == null || cachedShapeContents.Length != sortedShapeKeyNames.Count)
         {
             cachedShapeContents = new GUIContent[sortedShapeKeyNames.Count];
@@ -786,7 +785,6 @@ public class VRC_ExpressionEditor : EditorWindow
         if (GUILayout.Button(jumpUpIconContent, optW20, optH18)) leftScrollPos.y = 0f;
         EditorGUILayout.EndHorizontal();
 
-        // 追加：再生から戻った際などの、オブジェクトリストのサイズ不整合エラーを絶対に防ぐ
         if (cachedActiveObjects == null || cachedActiveObjects.Count != activeObjectValues.Count)
         {
             RecalculateObjNameWidth();
@@ -999,7 +997,7 @@ public class VRC_ExpressionEditor : EditorWindow
         BuildMirrorMap(); UpdateCacheArrays(); UpdateLayerLabelCache(); RefreshExpressionCache(); ApplySorting();
         if (loadFromSettings) SaveCurrentSettings();
 
-        if (VRC_ExpressionPreview.Instance != null) { VRC_ExpressionPreview.Instance.FindAndCacheSceneLight(); VRC_ExpressionPreview.Instance.ForceRebuildDummy(); }
+        if (VRC_ExpressionPreview.Instance != null) { VRC_ExpressionPreview.Instance.UpdateSceneLights(this); VRC_ExpressionPreview.Instance.ForceRebuildDummy(); }
         isClampBlendShapesEnabledCache = IsClampBlendShapesEnabled();
     }
 
