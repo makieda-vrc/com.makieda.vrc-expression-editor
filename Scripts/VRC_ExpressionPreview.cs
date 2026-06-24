@@ -1,7 +1,6 @@
 using UnityEngine;
 using UnityEditor;
 using System.Collections.Generic;
-using System.Linq;
 
 public class VRC_ExpressionPreview : EditorWindow
 {
@@ -10,6 +9,8 @@ public class VRC_ExpressionPreview : EditorWindow
     private PreviewRenderUtility previewUtility;
     private GameObject previewDummy;
     private GameObject lastRootObject;
+
+    // カメラのピボット（原点配置アプローチにより、バグのない安定した初期値に固定）
     private Vector3 cameraPivot = new Vector3(0, 1.5f, 0);
     private Vector3 cameraEuler = new Vector3(0, 180, 0);
     private float cameraDistance = 0.5f;
@@ -27,15 +28,39 @@ public class VRC_ExpressionPreview : EditorWindow
     }
     private List<MeshPair> cachedMeshPairs = new List<MeshPair>();
 
-    private Light cachedSceneLight;
+    // 追加ライト（Point/Spot等、影なし・0.1秒同期用）
+    private struct ReplicaLightPair
+    {
+        public UnityEngine.Light original;
+        public UnityEngine.Light replica;
+
+        public Vector3 lastPosition;
+        public Quaternion lastRotation;
+
+        public LightType lastType; // ★この1行を追加
+
+        public Color lastColor;
+        public float lastIntensity;
+        public float lastRange;
+        public float lastSpotAngle;
+    }
+
+    // 内蔵ライト（Directional・影あり・毎フレーム同期用）
+    private struct BuiltinLightSync
+    {
+        public UnityEngine.Light original;
+        public int builtinIndex; // 0 or 1
+    }
+
+    private List<ReplicaLightPair> activeReplicaLights = new List<ReplicaLightPair>();
+    private List<BuiltinLightSync> activeBuiltinSyncs = new List<BuiltinLightSync>();
+    private Dictionary<int, bool> lastLightSnapshots = new Dictionary<int, bool>();
+    private GameObject previewLightsRoot;
+
     private double lastLightCheckTime;
     private Color cachedAmbientColor = Color.gray;
-    private Quaternion lastLightRot;
-    private Color lastLightColor;
-    private float lastLightIntensity;
-    private LightShadows lastLightShadows;
-    private float lastLightShadowStrength;
-    private float lastLightShadowBias;
+
+    private bool replicaLightsNeedRebuild = false;
 
     private bool isAvatarChanged = true;
     private bool isDirty = true;
@@ -68,11 +93,14 @@ public class VRC_ExpressionPreview : EditorWindow
         Instance = this;
         isDirty = true;
         EditorApplication.update += OnEditorUpdate;
+        EditorApplication.hierarchyChanged += OnHierarchyChanged;
     }
 
     private void OnDisable()
     {
         EditorApplication.update -= OnEditorUpdate;
+        EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+
         CleanupPreview();
         if (previewUtility != null) { previewUtility.Cleanup(); previewUtility = null; }
     }
@@ -80,39 +108,321 @@ public class VRC_ExpressionPreview : EditorWindow
     private void CleanupPreview()
     {
         if (previewDummy != null) { DestroyImmediate(previewDummy); previewDummy = null; }
+        CleanupReplicaLights();
         cachedMeshPairs.Clear();
     }
 
+    private void CleanupReplicaLights()
+    {
+        if (previewLightsRoot != null) { DestroyImmediate(previewLightsRoot); previewLightsRoot = null; }
+        activeReplicaLights.Clear();
+        activeBuiltinSyncs.Clear();
+        lastLightSnapshots.Clear();
+        replicaLightsNeedRebuild = false;
+    }
+
     private void OnDestroy() { CleanupPreview(); }
+
+    private void OnHierarchyChanged()
+    {
+        var editor = VRC_ExpressionEditor.Instance;
+        if (editor == null || editor.IsDraggingSlider()) return;
+
+        replicaLightsNeedRebuild = true;
+    }
 
     private void OnEditorUpdate()
     {
         if (EditorApplication.isPlayingOrWillChangePlaymode) return;
 
-        if (VRC_ExpressionEditor.Instance == null) { this.Close(); return; }
+        var editor = VRC_ExpressionEditor.Instance;
+        if (editor == null) { this.Close(); return; }
 
         double timeSinceStartup = EditorApplication.timeSinceStartup;
-        if (timeSinceStartup - lastLightCheckTime < 0.1) return;
+        if (timeSinceStartup - lastLightCheckTime < 0.1) return; // 0.1秒周期
         lastLightCheckTime = timeSinceStartup;
 
-        if (cachedSceneLight == null) return;
+        // 【極限軽量化】ドラッグ操作中は0.1秒の同期処理すら完全に停止
+        if (editor.IsDraggingSlider()) return;
 
-        bool lightChanged = false;
-        if (cachedSceneLight.transform.rotation != lastLightRot) { lightChanged = true; lastLightRot = cachedSceneLight.transform.rotation; }
-        if (cachedSceneLight.color != lastLightColor) { lightChanged = true; lastLightColor = cachedSceneLight.color; }
-        if (cachedSceneLight.intensity != lastLightIntensity) { lightChanged = true; lastLightIntensity = cachedSceneLight.intensity; }
-        if (cachedSceneLight.shadows != lastLightShadows) { lightChanged = true; lastLightShadows = cachedSceneLight.shadows; }
-        if (cachedSceneLight.shadowStrength != lastLightShadowStrength) { lightChanged = true; lastLightShadowStrength = cachedSceneLight.shadowStrength; }
-        if (cachedSceneLight.shadowBias != lastLightShadowBias) { lightChanged = true; lastLightShadowBias = cachedSceneLight.shadowBias; }
+        // 1. 0.1秒に1回、ライトの構成変更チェック（Dictionary化によりシーン内の複製は無視されるため超高速）
+        if (replicaLightsNeedRebuild || CheckLightConfigurationChanged())
+        {
+            RebuildReplicaLights(editor);
+            Repaint();
+        }
+        else
+        {
+            // 2. 0.1秒に1回、追加ライト（Point/Spot）の値を同期（変更がある時のみ書き込み）
+            if (SyncReplicaLightParameters())
+            {
+                Repaint();
+            }
+        }
+    }
 
-        if (lightChanged) Repaint();
+    private List<UnityEngine.Light> GetOnlySceneLights()
+    {
+        var allLights = UnityEngine.Object.FindObjectsOfType<UnityEngine.Light>();
+        var sceneLights = new List<UnityEngine.Light>();
+
+        int count = allLights.Length;
+        for (int i = 0; i < count; i++)
+        {
+            UnityEngine.Light l = allLights[i];
+            if (l == null) continue;
+
+            // 複製ライト（"Replica_"から始まる一時ライト）をスキャンから確実に除外
+            if (l.name.StartsWith("Replica_")) continue;
+
+            sceneLights.Add(l);
+        }
+
+        return sceneLights;
+    }
+
+    private bool CheckLightConfigurationChanged()
+    {
+        var currentLights = GetOnlySceneLights();
+        int activeCount = currentLights.Count;
+
+        if (activeCount != lastLightSnapshots.Count) return true;
+
+        for (int i = 0; i < activeCount; i++)
+        {
+            UnityEngine.Light l = currentLights[i];
+            if (l == null) return true;
+
+            int id = l.GetInstanceID();
+            if (!lastLightSnapshots.TryGetValue(id, out bool lastActive) || l.gameObject.activeInHierarchy != lastActive)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 【ハイブリッド構築】ライトレプリカを構築します（低頻度：ライト構成変化時のみ実行）
+    /// </summary>
+    private void RebuildReplicaLights(VRC_ExpressionEditor editor)
+    {
+        CleanupReplicaLights();
+
+        if (editor == null || editor.rootObject == null || previewUtility == null) return;
+
+        previewLightsRoot = new GameObject("_PreviewLightsRoot");
+        previewLightsRoot.hideFlags = HideFlags.HideAndDontSave;
+
+        var currentLights = GetOnlySceneLights();
+        Vector3 avatarPos = editor.rootObject.transform.position;
+
+        var dirLights = new List<UnityEngine.Light>();
+        var otherLights = new List<UnityEngine.Light>();
+
+        int lightsCount = currentLights.Count;
+        for (int i = 0; i < lightsCount; i++)
+        {
+            UnityEngine.Light l = currentLights[i];
+            if (l == null || !l.gameObject.activeInHierarchy || l.lightmapBakeType == LightmapBakeType.Baked) continue;
+
+            if (l.type == LightType.Directional)
+            {
+                dirLights.Add(l);
+            }
+            else
+            {
+                float distance = Vector3.Distance(l.transform.position, avatarPos);
+                if (distance <= l.range * 1.2f)
+                {
+                    otherLights.Add(l);
+                }
+            }
+        }
+
+        dirLights.Sort((a, b) => b.intensity.CompareTo(a.intensity));
+
+        // 1. 【影あり優先】Directional Light (最大2灯) を内蔵ライトに登録
+        for (int i = 0; i < 2; i++)
+        {
+            if (i < dirLights.Count)
+            {
+                activeBuiltinSyncs.Add(new BuiltinLightSync
+                {
+                    original = dirLights[i],
+                    builtinIndex = i
+                });
+            }
+        }
+
+        // 2. 【影なし】Point/Spot などの追加ライトを複製生成
+        int otherCount = otherLights.Count;
+        for (int i = 0; i < otherCount; i++)
+        {
+            UnityEngine.Light srcLight = otherLights[i];
+
+            GameObject lightGo = new GameObject("Replica_" + srcLight.name);
+            lightGo.transform.SetParent(previewLightsRoot.transform);
+
+            // アバター相対位置（以前通り綺麗に光が当たります）
+            lightGo.transform.position = srcLight.transform.position - avatarPos;
+            lightGo.transform.rotation = srcLight.transform.rotation;
+
+            UnityEngine.Light destLight = lightGo.AddComponent<UnityEngine.Light>();
+
+            // 影は強制的に None にして落影の競合（チカチカ）を100%防止
+            CopyLightParameters(srcLight, destLight);
+            destLight.shadows = LightShadows.None;
+
+            var pair = new ReplicaLightPair
+            {
+                original = srcLight,
+                replica = destLight,
+                lastPosition = srcLight.transform.position,
+                lastRotation = srcLight.transform.rotation,
+                lastType = srcLight.type,
+                lastColor = srcLight.color,
+                lastIntensity = srcLight.intensity,
+                lastRange = srcLight.range,
+                lastSpotAngle = srcLight.spotAngle
+            };
+            activeReplicaLights.Add(pair);
+        }
+
+        lastLightSnapshots.Clear();
+        for (int i = 0; i < lightsCount; i++)
+        {
+            UnityEngine.Light l = currentLights[i];
+            if (l != null)
+            {
+                lastLightSnapshots[l.GetInstanceID()] = l.gameObject.activeInHierarchy;
+            }
+        }
+
+        replicaLightsNeedRebuild = false;
+    }
+
+    /// <summary>
+    /// 【0.1秒周期】追加ライト（Point/Spot）のパラメータ・トランスフォームの同期（変化時のみ書き込み）
+    /// </summary>
+    private bool SyncReplicaLightParameters()
+    {
+        bool anyChanged = false;
+        var editor = VRC_ExpressionEditor.Instance;
+        if (editor == null || editor.rootObject == null) return false;
+
+        Vector3 avatarPos = editor.rootObject.transform.position;
+
+        int count = activeReplicaLights.Count;
+        for (int i = 0; i < count; i++)
+        {
+            var pair = activeReplicaLights[i];
+            if (pair.original == null || pair.replica == null) continue;
+
+            UnityEngine.Light src = pair.original;
+            UnityEngine.Light dest = pair.replica;
+
+            // ① トランスフォーム同期（動いた時のみ書き込み）
+            if (src.transform.position != pair.lastPosition || src.transform.rotation != pair.lastRotation)
+            {
+                dest.transform.position = src.transform.position - avatarPos;
+                dest.transform.rotation = src.transform.rotation;
+                pair.lastPosition = src.transform.position;
+                pair.lastRotation = src.transform.rotation;
+                anyChanged = true;
+            }
+
+            // ② パラメータ同期（値が変化した時のみ書き込み）
+            bool paramChanged = false;
+            if (src.type != pair.lastType) { dest.type = src.type; pair.lastType = src.type; paramChanged = true; }
+            if (src.color != pair.lastColor) { dest.color = src.color; pair.lastColor = src.color; paramChanged = true; }
+            if (!Mathf.Approximately(src.intensity, pair.lastIntensity)) { dest.intensity = src.intensity; pair.lastIntensity = src.intensity; paramChanged = true; }
+            if (!Mathf.Approximately(src.range, pair.lastRange)) { dest.range = src.range; pair.lastRange = src.range; paramChanged = true; }
+            if (!Mathf.Approximately(src.spotAngle, pair.lastSpotAngle)) { dest.spotAngle = src.spotAngle; pair.lastSpotAngle = src.spotAngle; paramChanged = true; }
+
+            if (paramChanged)
+            {
+                activeReplicaLights[i] = pair;
+                anyChanged = true;
+            }
+        }
+
+        return anyChanged;
+    }
+
+    /// <summary>
+    /// 【毎フレーム（OnGUI）】BeginPreviewのリセット対策として、最小限の内蔵ライト（Directional最大2灯）のみを同期します
+    /// </summary>
+    private void SyncBuiltinLightsImmediate()
+    {
+        if (previewUtility == null) return;
+
+        cachedAmbientColor = RenderSettings.ambientLight;
+        int builtinCount = activeBuiltinSyncs.Count;
+
+        for (int i = 0; i < 2; i++)
+        {
+            var dest = previewUtility.lights[i];
+
+            if (i < builtinCount)
+            {
+                var sync = activeBuiltinSyncs[i];
+                if (sync.original != null)
+                {
+                    dest.enabled = true;
+                    dest.transform.rotation = sync.original.transform.rotation;
+
+                    // 内蔵ライトが許容する最小限のパラメータのみ同期（余計な type の書き換え等は行わず高速処理）
+                    dest.color = sync.original.color;
+                    dest.intensity = sync.original.intensity;
+                    dest.shadows = sync.original.shadows;
+                    dest.shadowStrength = sync.original.shadowStrength;
+                    dest.shadowBias = sync.original.shadowBias;
+                    dest.shadowNormalBias = sync.original.shadowNormalBias;
+                }
+            }
+            else
+            {
+                if (i == 0)
+                {
+                    dest.enabled = false;
+                    dest.intensity = 0f;
+                }
+                else
+                {
+                    // 2灯目が余っていれば「本物の環境光（Ambient）」として機能させる
+                    dest.enabled = true;
+                    dest.type = LightType.Directional;
+                    dest.color = cachedAmbientColor;
+                    dest.intensity = 1.0f;
+                    dest.shadows = LightShadows.None;
+                }
+            }
+        }
+    }
+
+    private void CopyLightParameters(UnityEngine.Light src, UnityEngine.Light dest)
+    {
+        dest.type = src.type;
+        dest.color = src.color;
+        dest.intensity = src.intensity;
+        dest.range = src.range;
+        dest.spotAngle = src.spotAngle;
+        dest.shadows = src.shadows;
+        dest.shadowStrength = src.shadowStrength;
+        dest.shadowBias = src.shadowBias;
+        dest.shadowNormalBias = src.shadowNormalBias;
+        dest.shadowNearPlane = src.shadowNearPlane;
     }
 
     public void UpdateSingleBlendShapeImmediate(string relativePath, string shapeName, float value)
     {
         if (previewDummy == null) return;
-        foreach (var pair in cachedMeshPairs)
+        int count = cachedMeshPairs.Count;
+        for (int i = 0; i < count; i++)
         {
+            var pair = cachedMeshPairs[i];
             if (pair.relativePath == relativePath)
             {
                 if (pair.shapeIndexMap.TryGetValue(shapeName, out int index))
@@ -137,9 +447,6 @@ public class VRC_ExpressionPreview : EditorWindow
 
     public void FindAndCacheSceneLight()
     {
-        cachedSceneLight = null;
-        var lights = FindObjectsOfType<Light>();
-        if (lights != null) cachedSceneLight = lights.FirstOrDefault(x => x.type == LightType.Directional);
         cachedAmbientColor = RenderSettings.ambientLight;
     }
 
@@ -167,10 +474,12 @@ public class VRC_ExpressionPreview : EditorWindow
         var editor = VRC_ExpressionEditor.Instance;
         if (editor == null) return;
 
+        int count = cachedMeshPairs.Count;
         foreach (var pathKvp in previousClipValues)
         {
-            foreach (var pair in cachedMeshPairs)
+            for (int i = 0; i < count; i++)
             {
+                var pair = cachedMeshPairs[i];
                 if (pair.relativePath == pathKvp.Key)
                 {
                     editor.baseShapeKeyBackup.TryGetValue(pathKvp.Key, out var baseDict);
@@ -233,7 +542,6 @@ public class VRC_ExpressionPreview : EditorWindow
         EditorGUI.DrawRect(rect, new Color(0.15f, 0.15f, 0.15f, 1f));
 
         HandleCameraControls(rect);
-        SyncSceneLightingToPreview();
 
         if (Event.current.type == EventType.Repaint)
         {
@@ -250,7 +558,22 @@ public class VRC_ExpressionPreview : EditorWindow
             }
 
             previewUtility.BeginPreview(rect, GUIStyle.none);
-            if (previewDummy != null) { previewUtility.AddSingleGO(previewDummy); previewUtility.camera.Render(); }
+
+            // ★ BeginPreview された直後のリセットされた内蔵ライトを、ここで「毎フレーム安全に強制上書き」
+            SyncBuiltinLightsImmediate();
+
+            if (previewDummy != null)
+            {
+                previewUtility.AddSingleGO(previewDummy);
+
+                // 親の lightsRoot を AddSingleGO することで、複製された Point/Spot ライトが一斉に光ります
+                if (previewLightsRoot != null)
+                {
+                    previewUtility.AddSingleGO(previewLightsRoot);
+                }
+
+                previewUtility.camera.Render();
+            }
             Texture rTex = previewUtility.EndPreview();
             if (rTex != null) GUI.DrawTexture(rect, rTex, ScaleMode.StretchToFill, false);
         }
@@ -304,22 +627,27 @@ public class VRC_ExpressionPreview : EditorWindow
             SyncTransformsAndActive(editor.rootObject.transform, previewDummy.transform, true);
             StripAllUnwantedComponents(previewDummy);
 
+            // アバター自体は常に原点 (0,0,0) に美しく静止させます（カメラガタつき防止）
             previewDummy.transform.position = Vector3.zero;
             previewDummy.transform.rotation = Quaternion.identity;
 
             if (isAvatarChanged) { ResetCameraPivot(); isAvatarChanged = false; }
             FindAndCacheSceneLight();
+
+            RebuildReplicaLights(editor);
             BuildMeshPairsCache(editor);
 
             if (editor.testBaseClip != null) editor.testBaseClip.SampleAnimation(previewDummy, 0f);
             if (editingClip != null) editingClip.SampleAnimation(previewDummy, 0f);
         }
 
-        foreach (var pair in cachedMeshPairs)
+        int pairCount = cachedMeshPairs.Count;
+        for (int i = 0; i < pairCount; i++)
         {
+            var pair = cachedMeshPairs[i];
             var dummySmr = pair.dummySmr;
             string path = pair.relativePath;
-            if (dummySmr == null || dummySmr.sharedMesh == null) continue;
+            if (dummySmr == null || dummySmr.sharedMesh != null) continue;
 
             if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict))
                 foreach (var kvp in baseDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) dummySmr.SetBlendShapeWeight(index, kvp.Value);
@@ -337,7 +665,10 @@ public class VRC_ExpressionPreview : EditorWindow
             string targetPath = editor.GetRelativePath(targetSmr.gameObject);
 
             MeshPair activePair = default; bool found = false;
-            foreach (var pair in cachedMeshPairs) if (pair.relativePath == targetPath) { activePair = pair; found = true; break; }
+            for (int i = 0; i < pairCount; i++)
+            {
+                if (cachedMeshPairs[i].relativePath == targetPath) { activePair = cachedMeshPairs[i]; found = true; break; }
+            }
 
             if (found && activePair.dummySmr != null)
             {
@@ -383,42 +714,19 @@ public class VRC_ExpressionPreview : EditorWindow
         }
     }
 
-    private void ResetCameraPivot() { cameraPivot = savedHeadLocalPosition + Vector3.up * 0.05f; cameraEuler = new Vector3(0, 180, 0); cameraDistance = 0.5f; MarkPreviewDirty(); }
+    private void ResetCameraPivot()
+    {
+        cameraPivot = savedHeadLocalPosition + Vector3.up * 0.05f;
+        cameraEuler = new Vector3(0, 180, 0);
+        cameraDistance = 0.5f;
+        MarkPreviewDirty();
+    }
 
     private SkinnedMeshRenderer FindCorrespondingSMR(VRC_ExpressionEditor editor, GameObject parent, SkinnedMeshRenderer original)
     {
         if (original == null) return null; string path = editor.GetRelativePath(original.gameObject);
         if (string.IsNullOrEmpty(path)) return parent.GetComponent<SkinnedMeshRenderer>();
         Transform t = parent.transform.Find(path); return t != null ? t.GetComponent<SkinnedMeshRenderer>() : null;
-    }
-
-    private void SyncSceneLightingToPreview()
-    {
-        if (previewUtility == null) return;
-        var sceneLight = cachedSceneLight;
-        if (sceneLight != null && sceneLight.gameObject != null && sceneLight.enabled && sceneLight.gameObject.activeInHierarchy)
-        {
-            previewUtility.lights[0].enabled = true;
-            previewUtility.lights[0].color = sceneLight.color;
-            previewUtility.lights[0].intensity = sceneLight.intensity;
-            previewUtility.lights[0].transform.rotation = sceneLight.transform.rotation;
-
-            previewUtility.lights[0].shadows = sceneLight.shadows;
-            previewUtility.lights[0].shadowStrength = sceneLight.shadowStrength;
-            previewUtility.lights[0].shadowBias = sceneLight.shadowBias;
-            previewUtility.lights[0].shadowNormalBias = sceneLight.shadowNormalBias;
-            previewUtility.lights[0].shadowNearPlane = sceneLight.shadowNearPlane;
-        }
-        else
-        {
-            previewUtility.lights[0].enabled = true;
-            previewUtility.lights[0].color = Color.white;
-            previewUtility.lights[0].intensity = 1.0f;
-            previewUtility.lights[0].transform.rotation = Quaternion.Euler(30f, 135f, 0f);
-            previewUtility.lights[0].shadows = LightShadows.None;
-        }
-        previewUtility.lights[1].color = cachedAmbientColor;
-        previewUtility.lights[1].intensity = 1.0f;
     }
 
     private void SyncTransformsAndActive(Transform src, Transform dst, bool isRoot = true)
@@ -527,12 +835,14 @@ public class VRC_ExpressionPreview : EditorWindow
     private void ApplyMuteExpressionDirectly(VRC_ExpressionEditor editor)
     {
         if (previewDummy == null || editor == null) return;
-        foreach (var pair in cachedMeshPairs)
+        int pairCount = cachedMeshPairs.Count;
+        for (int i = 0; i < pairCount; i++)
         {
+            var pair = cachedMeshPairs[i];
             var dummySmr = pair.dummySmr; string path = pair.relativePath;
-            if (dummySmr == null || dummySmr.sharedMesh == null) continue;
+            if (dummySmr == null || dummySmr.sharedMesh != null) continue;
             if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict))
-                for (int i = 0; i < dummySmr.sharedMesh.blendShapeCount; i++) { baseDict.TryGetValue(dummySmr.sharedMesh.GetBlendShapeName(i), out float val); dummySmr.SetBlendShapeWeight(i, val); }
+                for (int j = 0; j < dummySmr.sharedMesh.blendShapeCount; j++) { baseDict.TryGetValue(dummySmr.sharedMesh.GetBlendShapeName(j), out float val); dummySmr.SetBlendShapeWeight(j, val); }
             if (editor.clipExpressionValues.TryGetValue(path, out var clipDict))
                 foreach (var kvp in clipDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int idx)) dummySmr.SetBlendShapeWeight(idx, 0f);
         }
@@ -542,11 +852,13 @@ public class VRC_ExpressionPreview : EditorWindow
     private void CaptureNormalExpression()
     {
         normalSMRWeights.Clear(); normalObjectActives.Clear(); if (previewDummy == null) return;
-        foreach (var pair in cachedMeshPairs)
+        int count = cachedMeshPairs.Count;
+        for (int i = 0; i < count; i++)
         {
-            if (pair.dummySmr == null || pair.dummySmr.sharedMesh == null) continue;
+            var pair = cachedMeshPairs[i];
+            if (pair.dummySmr == null || pair.dummySmr.sharedMesh != null) continue;
             float[] weights = new float[pair.dummySmr.sharedMesh.blendShapeCount];
-            for (int i = 0; i < weights.Length; i++) weights[i] = pair.dummySmr.GetBlendShapeWeight(i);
+            for (int j = 0; j < weights.Length; j++) weights[j] = pair.dummySmr.GetBlendShapeWeight(j);
             normalSMRWeights[pair.dummySmr] = weights;
         }
         var editor = VRC_ExpressionEditor.Instance;
@@ -585,11 +897,13 @@ public class VRC_ExpressionPreview : EditorWindow
         snapshotSMRWeights.Clear(); snapshotObjectActives.Clear();
         if (previewDummy == null) return;
 
-        foreach (var pair in cachedMeshPairs)
+        int count = cachedMeshPairs.Count;
+        for (int i = 0; i < count; i++)
         {
-            if (pair.dummySmr == null || pair.dummySmr.sharedMesh == null) continue;
+            var pair = cachedMeshPairs[i];
+            if (pair.dummySmr == null || pair.dummySmr.sharedMesh != null) continue;
             float[] weights = new float[pair.dummySmr.sharedMesh.blendShapeCount];
-            for (int i = 0; i < weights.Length; i++) weights[i] = pair.dummySmr.GetBlendShapeWeight(i);
+            for (int j = 0; j < weights.Length; j++) weights[j] = pair.dummySmr.GetBlendShapeWeight(j);
             snapshotSMRWeights[pair.dummySmr] = weights;
         }
 
@@ -678,7 +992,7 @@ public class VRC_ExpressionPreview : EditorWindow
         {
             previewUtility = new PreviewRenderUtility();
             previewUtility.camera.cullingMask = -1; previewUtility.camera.fieldOfView = 30f;
-            previewUtility.camera.nearClipPlane = 0.01f; previewUtility.camera.farClipPlane = 10f;
+            previewUtility.camera.nearClipPlane = 0.01f; previewUtility.camera.farClipPlane = 50f;
             previewUtility.camera.backgroundColor = new Color(0.19f, 0.19f, 0.19f, 1f); previewUtility.camera.clearFlags = CameraClearFlags.SolidColor;
         }
     }
