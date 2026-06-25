@@ -25,11 +25,14 @@ public class ExpressionEditorSettings : ScriptableObject
     public List<ExpressionSettingEntry> settings = new List<ExpressionSettingEntry>();
     public string lastIconSavePath = "Assets";
 
+    // エディタウィンドウの全般設定
     public bool isFilterWindowOpen = false;
     public float filterPanelWidth = 150f;
-
-    // 🟢 追加：前回選択していたアバターの名前をグローバルに記憶
     public string lastAvatarName = "";
+
+    // サムネイルウィンドウの設定
+    public int thumbnailSizeScale = 100; // 50〜150のパーセンテージで保存
+    public bool showDetailInfo = false;  // 詳細表示（レイヤー/ステート名）のON/OFF
 
     public ExpressionSettingEntry GetEntry(string guid) => settings.Find(x => x.fxGuid == guid);
 
