@@ -468,11 +468,10 @@ public class VRC_ExpressionPreview : EditorWindow
 
         if (Event.current.type == EventType.Repaint)
         {
-            // 【軽量化】ドラッグ中の「更新ストップ」の判定を削除し、常に即時更新する
-            // メイン画面との干渉が解消されたため、ここで描画を一時停止する必要がなくなりました。
+            bool isDraggingNow = editor.IsDraggingSlider();
+
             if (previewDummy == null || isDirty)
             {
-                // 【二度手間の完全解消】比較ONの時は、現在の顔のシミュレートをサボって、ダイレクトに過去顔を流し込む
                 if (isComparing)
                 {
                     EnsureDummyExists(editor);
@@ -573,7 +572,6 @@ public class VRC_ExpressionPreview : EditorWindow
             UpdateTestBaseClipCache(editor.testBaseClip, editor);
         }
 
-        // 【軽量化】全ループを廃止し、前回触ったキーだけを高速ピンポイントリセット
         ResetModifiedBlendShapes();
 
         int pairCount = cachedMeshPairs.Count;
@@ -744,8 +742,17 @@ public class VRC_ExpressionPreview : EditorWindow
         isComparing = GUILayout.Toggle(isComparing, "👁️ 比較 (ON/OFF)", GUI.skin.button, optH20);
         if (EditorGUI.EndChangeCheck())
         {
-            if (isComparing) isMuted = false;
-            MarkPreviewDirty();
+            // 【即時反映の核】トグルが切り替わった瞬間(MouseUp)に直接その場で表情を上書き更新
+            isDirty = true;
+            if (isComparing)
+            {
+                EnsureDummyExists(editor);
+                ApplySnapshotDirectly();
+            }
+            else
+            {
+                SetupAndPoseDummy(editor);
+            }
             Repaint();
         }
         GUI.backgroundColor = prevBg;
@@ -756,8 +763,17 @@ public class VRC_ExpressionPreview : EditorWindow
         isMuted = GUILayout.Toggle(isMuted, "🔇 ミュート", GUI.skin.button, optH20);
         if (EditorGUI.EndChangeCheck())
         {
-            if (isMuted) isComparing = false;
-            MarkPreviewDirty();
+            // 【即時反映】
+            isDirty = true;
+            if (isMuted)
+            {
+                EnsureDummyExists(editor);
+                ApplyMuteExpressionDirectly(editor);
+            }
+            else
+            {
+                SetupAndPoseDummy(editor);
+            }
             Repaint();
         }
         GUI.backgroundColor = prevBgMute;
