@@ -671,10 +671,17 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void SelectNewClipManually(AnimationClip clip)
     {
-        if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues);
-        if (!manuallyCreatedClips.Contains(clip)) manuallyCreatedClips.Add(clip);
+        if (VRC_ExpressionPreview.Instance != null) { VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues); }
+        if (!manuallyCreatedClips.Contains(clip)) { manuallyCreatedClips.Add(clip); }
         UpdateAvailableClips(); int idx = availableClips.IndexOf(clip);
-        if (idx != -1) { selectedClipIndex = idx; RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview(); }
+        if (idx != -1)
+        {
+            selectedClipIndex = idx;
+            UpdateCacheArrays(); // ★ここで新しいアニメーションの警告判定を再計算します
+            RefreshExpressionCache();
+            ApplySorting();
+            ForceRepaintPreview();
+        }
         SaveCurrentSettings();
     }
 
