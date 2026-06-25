@@ -10,10 +10,9 @@ public class VRC_ExpressionPreview : EditorWindow
     private GameObject previewDummy;
     private GameObject lastRootObject;
 
-    // カメラのピボット（原点配置アプローチにより、バグのない安定した初期値に固定）
     private Vector3 cameraPivot = new Vector3(0, 1.5f, 0);
     private Vector3 cameraEuler = new Vector3(0, 180, 0);
-    private float cameraDistance = 0.40f; // 0.5f から 0.40f に変更（顔に近づけます）
+    private float cameraDistance = 0.40f;
 
     private Vector3 savedHeadLocalPosition = new Vector3(0, 1.4f, 0);
     private AnimationClip cachedTestBaseClip;
@@ -28,28 +27,23 @@ public class VRC_ExpressionPreview : EditorWindow
     }
     private List<MeshPair> cachedMeshPairs = new List<MeshPair>();
 
-    // 追加ライト（Point/Spot等、影なし・0.1秒同期用）
     private struct ReplicaLightPair
     {
         public UnityEngine.Light original;
         public UnityEngine.Light replica;
-
         public Vector3 lastPosition;
         public Quaternion lastRotation;
-
         public LightType lastType;
-
         public Color lastColor;
         public float lastIntensity;
         public float lastRange;
         public float lastSpotAngle;
     }
 
-    // 内蔵ライト（Directional・影あり・毎フレーム同期用）
     private struct BuiltinLightSync
     {
         public UnityEngine.Light original;
-        public int builtinIndex; // 0 or 1
+        public int builtinIndex;
     }
 
     private List<ReplicaLightPair> activeReplicaLights = new List<ReplicaLightPair>();
@@ -61,34 +55,35 @@ public class VRC_ExpressionPreview : EditorWindow
     private Color cachedAmbientColor = Color.gray;
 
     private bool replicaLightsNeedRebuild = false;
-
     private bool isAvatarChanged = true;
     private bool isDirty = true;
 
     private enum CameraTool { Pan, Orbit, Zoom }
     private CameraTool currentCameraTool = CameraTool.Orbit;
 
-    private Dictionary<EditorCurveBinding, AnimationCurve> snapshotCurves = new Dictionary<EditorCurveBinding, AnimationCurve>();
-    private Dictionary<SkinnedMeshRenderer, float[]> snapshotSMRWeights = new Dictionary<SkinnedMeshRenderer, float[]>();
-    private Dictionary<GameObject, bool> snapshotObjectActives = new Dictionary<GameObject, bool>();
+    // データ復元用（アニメ書き戻し用）
+    private Dictionary<string, Dictionary<string, float>> snapshotClipValues = new Dictionary<string, Dictionary<string, float>>();
+    private Dictionary<string, bool> snapshotClipActiveValues = new Dictionary<string, bool>();
 
-    private Dictionary<SkinnedMeshRenderer, float[]> normalSMRWeights = new Dictionary<SkinnedMeshRenderer, float[]>();
-    private Dictionary<GameObject, bool> normalObjectActives = new Dictionary<GameObject, bool>();
+    // プレビュー比較用（見た目用）
+    private Dictionary<string, Dictionary<int, float>> snapshotSMRWeights = new Dictionary<string, Dictionary<int, float>>();
+    private Dictionary<string, bool> snapshotObjectActives = new Dictionary<string, bool>();
+
+    // 変更されたシェイプキーだけを追跡し、無駄なリセット処理を回避する
+    private Dictionary<SkinnedMeshRenderer, HashSet<int>> modifiedBlendShapes = new Dictionary<SkinnedMeshRenderer, HashSet<int>>();
 
     private bool isComparing = false;
     private bool isMuted = false;
 
     private Vector2 uiScrollPos;
-
     private static readonly string[] CAMERA_TOOL_NAMES = new string[] { "平行", "回転", "ズーム" };
 
     private GUIContent resizeIconContent;
     private GUILayoutOption optW28, optW45, optW65;
     private GUILayoutOption optH20, optH26, optExpandTrue;
-
     private GUIStyle centerLockStyle;
 
-    private string pendingCapturePath = null; // 撮影要求用パス
+    private string pendingCapturePath = null;
 
     private void OnEnable()
     {
@@ -112,6 +107,7 @@ public class VRC_ExpressionPreview : EditorWindow
         if (previewDummy != null) { DestroyImmediate(previewDummy); previewDummy = null; }
         CleanupReplicaLights();
         cachedMeshPairs.Clear();
+        modifiedBlendShapes.Clear();
     }
 
     private void CleanupReplicaLights()
@@ -129,7 +125,6 @@ public class VRC_ExpressionPreview : EditorWindow
     {
         var editor = VRC_ExpressionEditor.Instance;
         if (editor == null || editor.IsDraggingSlider()) return;
-
         replicaLightsNeedRebuild = true;
     }
 
@@ -141,26 +136,41 @@ public class VRC_ExpressionPreview : EditorWindow
         if (editor == null) { this.Close(); return; }
 
         double timeSinceStartup = EditorApplication.timeSinceStartup;
-        if (timeSinceStartup - lastLightCheckTime < 0.1) return; // 0.1秒周期
+        if (timeSinceStartup - lastLightCheckTime < 0.1) return;
         lastLightCheckTime = timeSinceStartup;
 
-        // 【極限軽量化】ドラッグ操作中は0.1秒の同期処理すら完全に停止
         if (editor.IsDraggingSlider()) return;
 
-        // 1. 0.1秒に1回、ライトの構成変更チェック
-        if (replicaLightsNeedRebuild || CheckLightConfigurationChanged())
+        if (replicaLightsNeedRebuild)
         {
             RebuildReplicaLights(editor);
             Repaint();
         }
         else
         {
-            // 2. 0.1秒に1回、追加ライト（Point/Spot）の値を同期
-            if (SyncReplicaLightParameters())
+            if (SyncReplicaLightParameters()) Repaint();
+        }
+    }
+
+    private void SetDummyWeight(SkinnedMeshRenderer smr, int index, float value)
+    {
+        if (smr == null) return;
+        smr.SetBlendShapeWeight(index, value);
+
+        if (!modifiedBlendShapes.ContainsKey(smr)) modifiedBlendShapes[smr] = new HashSet<int>();
+        modifiedBlendShapes[smr].Add(index);
+    }
+
+    private void ResetModifiedBlendShapes()
+    {
+        foreach (var kvp in modifiedBlendShapes)
+        {
+            if (kvp.Key != null)
             {
-                Repaint();
+                foreach (int index in kvp.Value) kvp.Key.SetBlendShapeWeight(index, 0f);
             }
         }
+        modifiedBlendShapes.Clear();
     }
 
     private List<UnityEngine.Light> GetOnlySceneLights()
@@ -173,35 +183,10 @@ public class VRC_ExpressionPreview : EditorWindow
         {
             UnityEngine.Light l = allLights[i];
             if (l == null) continue;
-
             if (l.name.StartsWith("Replica_")) continue;
-
             sceneLights.Add(l);
         }
-
         return sceneLights;
-    }
-
-    private bool CheckLightConfigurationChanged()
-    {
-        var currentLights = GetOnlySceneLights();
-        int activeCount = currentLights.Count;
-
-        if (activeCount != lastLightSnapshots.Count) return true;
-
-        for (int i = 0; i < activeCount; i++)
-        {
-            UnityEngine.Light l = currentLights[i];
-            if (l == null) return true;
-
-            int id = l.GetInstanceID();
-            if (!lastLightSnapshots.TryGetValue(id, out bool lastActive) || l.gameObject.activeInHierarchy != lastActive)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private void RebuildReplicaLights(VRC_ExpressionEditor editor)
@@ -225,17 +210,11 @@ public class VRC_ExpressionPreview : EditorWindow
             UnityEngine.Light l = currentLights[i];
             if (l == null || !l.gameObject.activeInHierarchy || l.lightmapBakeType == LightmapBakeType.Baked) continue;
 
-            if (l.type == LightType.Directional)
-            {
-                dirLights.Add(l);
-            }
+            if (l.type == LightType.Directional) dirLights.Add(l);
             else
             {
                 float distance = Vector3.Distance(l.transform.position, avatarPos);
-                if (distance <= l.range * 1.2f)
-                {
-                    otherLights.Add(l);
-                }
+                if (distance <= l.range * 1.2f) otherLights.Add(l);
             }
         }
 
@@ -243,33 +222,23 @@ public class VRC_ExpressionPreview : EditorWindow
 
         for (int i = 0; i < 2; i++)
         {
-            if (i < dirLights.Count)
-            {
-                activeBuiltinSyncs.Add(new BuiltinLightSync
-                {
-                    original = dirLights[i],
-                    builtinIndex = i
-                });
-            }
+            if (i < dirLights.Count) activeBuiltinSyncs.Add(new BuiltinLightSync { original = dirLights[i], builtinIndex = i });
         }
 
         int otherCount = otherLights.Count;
         for (int i = 0; i < otherCount; i++)
         {
             UnityEngine.Light srcLight = otherLights[i];
-
             GameObject lightGo = new GameObject("Replica_" + srcLight.name);
             lightGo.transform.SetParent(previewLightsRoot.transform);
-
             lightGo.transform.position = srcLight.transform.position - avatarPos;
             lightGo.transform.rotation = srcLight.transform.rotation;
 
             UnityEngine.Light destLight = lightGo.AddComponent<UnityEngine.Light>();
-
             CopyLightParameters(srcLight, destLight);
             destLight.shadows = LightShadows.None;
 
-            var pair = new ReplicaLightPair
+            activeReplicaLights.Add(new ReplicaLightPair
             {
                 original = srcLight,
                 replica = destLight,
@@ -280,18 +249,14 @@ public class VRC_ExpressionPreview : EditorWindow
                 lastIntensity = srcLight.intensity,
                 lastRange = srcLight.range,
                 lastSpotAngle = srcLight.spotAngle
-            };
-            activeReplicaLights.Add(pair);
+            });
         }
 
         lastLightSnapshots.Clear();
         for (int i = 0; i < lightsCount; i++)
         {
             UnityEngine.Light l = currentLights[i];
-            if (l != null)
-            {
-                lastLightSnapshots[l.GetInstanceID()] = l.gameObject.activeInHierarchy;
-            }
+            if (l != null) lastLightSnapshots[l.GetInstanceID()] = l.gameObject.activeInHierarchy;
         }
 
         replicaLightsNeedRebuild = false;
@@ -304,7 +269,6 @@ public class VRC_ExpressionPreview : EditorWindow
         if (editor == null || editor.rootObject == null) return false;
 
         Vector3 avatarPos = editor.rootObject.transform.position;
-
         int count = activeReplicaLights.Count;
         for (int i = 0; i < count; i++)
         {
@@ -330,27 +294,20 @@ public class VRC_ExpressionPreview : EditorWindow
             if (!Mathf.Approximately(src.range, pair.lastRange)) { dest.range = src.range; pair.lastRange = src.range; paramChanged = true; }
             if (!Mathf.Approximately(src.spotAngle, pair.lastSpotAngle)) { dest.spotAngle = src.spotAngle; pair.lastSpotAngle = src.spotAngle; paramChanged = true; }
 
-            if (paramChanged)
-            {
-                activeReplicaLights[i] = pair;
-                anyChanged = true;
-            }
+            if (paramChanged) { activeReplicaLights[i] = pair; anyChanged = true; }
         }
-
         return anyChanged;
     }
 
     private void SyncBuiltinLightsImmediate()
     {
         if (previewUtility == null) return;
-
         cachedAmbientColor = RenderSettings.ambientLight;
         int builtinCount = activeBuiltinSyncs.Count;
 
         for (int i = 0; i < 2; i++)
         {
             var dest = previewUtility.lights[i];
-
             if (i < builtinCount)
             {
                 var sync = activeBuiltinSyncs[i];
@@ -358,7 +315,6 @@ public class VRC_ExpressionPreview : EditorWindow
                 {
                     dest.enabled = true;
                     dest.transform.rotation = sync.original.transform.rotation;
-
                     dest.color = sync.original.color;
                     dest.intensity = sync.original.intensity;
                     dest.shadows = sync.original.shadows;
@@ -369,18 +325,11 @@ public class VRC_ExpressionPreview : EditorWindow
             }
             else
             {
-                if (i == 0)
-                {
-                    dest.enabled = false;
-                    dest.intensity = 0f;
-                }
+                if (i == 0) { dest.enabled = false; dest.intensity = 0f; }
                 else
                 {
-                    dest.enabled = true;
-                    dest.type = LightType.Directional;
-                    dest.color = cachedAmbientColor;
-                    dest.intensity = 1.0f;
-                    dest.shadows = LightShadows.None;
+                    dest.enabled = true; dest.type = LightType.Directional;
+                    dest.color = cachedAmbientColor; dest.intensity = 1.0f; dest.shadows = LightShadows.None;
                 }
             }
         }
@@ -388,21 +337,15 @@ public class VRC_ExpressionPreview : EditorWindow
 
     private void CopyLightParameters(UnityEngine.Light src, UnityEngine.Light dest)
     {
-        dest.type = src.type;
-        dest.color = src.color;
-        dest.intensity = src.intensity;
-        dest.range = src.range;
-        dest.spotAngle = src.spotAngle;
-        dest.shadows = src.shadows;
-        dest.shadowStrength = src.shadowStrength;
-        dest.shadowBias = src.shadowBias;
-        dest.shadowNormalBias = src.shadowNormalBias;
-        dest.shadowNearPlane = src.shadowNearPlane;
+        dest.type = src.type; dest.color = src.color; dest.intensity = src.intensity;
+        dest.range = src.range; dest.spotAngle = src.spotAngle; dest.shadows = src.shadows;
+        dest.shadowStrength = src.shadowStrength; dest.shadowBias = src.shadowBias;
+        dest.shadowNormalBias = src.shadowNormalBias; dest.shadowNearPlane = src.shadowNearPlane;
     }
 
     public void UpdateSingleBlendShapeImmediate(string relativePath, string shapeName, float value)
     {
-        if (previewDummy == null) return;
+        if (previewDummy == null || isComparing || isMuted) return;
         int count = cachedMeshPairs.Count;
         for (int i = 0; i < count; i++)
         {
@@ -411,7 +354,7 @@ public class VRC_ExpressionPreview : EditorWindow
             {
                 if (pair.shapeIndexMap.TryGetValue(shapeName, out int index))
                 {
-                    pair.dummySmr.SetBlendShapeWeight(index, value);
+                    SetDummyWeight(pair.dummySmr, index, value);
                 }
                 break;
             }
@@ -420,7 +363,7 @@ public class VRC_ExpressionPreview : EditorWindow
 
     public void UpdateSingleObjectActiveImmediate(string path, bool isActive)
     {
-        if (previewDummy == null) return;
+        if (previewDummy == null || isComparing || isMuted) return;
         Transform target = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path);
         if (target != null) target.gameObject.SetActive(isActive);
     }
@@ -473,7 +416,7 @@ public class VRC_ExpressionPreview : EditorWindow
                         {
                             float defaultVal = 0f;
                             if (baseDict != null && baseDict.TryGetValue(shapeKvp.Key, out float cachedVal)) defaultVal = cachedVal;
-                            pair.dummySmr.SetBlendShapeWeight(index, defaultVal);
+                            SetDummyWeight(pair.dummySmr, index, defaultVal);
                         }
                     }
                     break;
@@ -489,12 +432,8 @@ public class VRC_ExpressionPreview : EditorWindow
             resizeIconContent = EditorGUIUtility.IconContent("d_ViewToolZoom");
             resizeIconContent.tooltip = "ウィンドウサイズを自動調整します";
 
-            optW28 = GUILayout.Width(28);
-            optW45 = GUILayout.Width(45);
-            optW65 = GUILayout.Width(65);
-            optH20 = GUILayout.Height(20);
-            optH26 = GUILayout.Height(26);
-            optExpandTrue = GUILayout.ExpandWidth(true);
+            optW28 = GUILayout.Width(28); optW45 = GUILayout.Width(45); optW65 = GUILayout.Width(65);
+            optH20 = GUILayout.Height(20); optH26 = GUILayout.Height(26); optExpandTrue = GUILayout.ExpandWidth(true);
 
             centerLockStyle = new GUIStyle(EditorStyles.boldLabel);
             centerLockStyle.alignment = TextAnchor.MiddleCenter;
@@ -529,10 +468,23 @@ public class VRC_ExpressionPreview : EditorWindow
 
         if (Event.current.type == EventType.Repaint)
         {
-            bool isDraggingNow = GUIUtility.hotControl != 0;
-            if (!isComparing && !isMuted && ((isDirty && !isDraggingNow) || previewDummy == null))
+            // つかみ判定の判定は、メインエディタのスライダー操作のみを正確に見る
+            bool isDraggingNow = editor.IsDraggingSlider();
+
+            if (previewDummy == null || (isDirty && !isDraggingNow))
             {
-                SetupAndPoseDummy(editor);
+                // 【二度手間の完全解消】比較ONの時は、現在の顔のシミュレートをサボって、ダイレクトに過去顔を流し込む
+                if (isComparing)
+                {
+                    EnsureDummyExists(editor);
+                    ApplySnapshotDirectly();
+                }
+                else
+                {
+                    SetupAndPoseDummy(editor);
+                    if (isMuted) ApplyMuteExpressionDirectly(editor);
+                }
+
                 UpdatePreviewCamera();
                 isDirty = false;
             }
@@ -542,21 +494,15 @@ public class VRC_ExpressionPreview : EditorWindow
             }
 
             previewUtility.BeginPreview(rect, GUIStyle.none);
-
             SyncBuiltinLightsImmediate();
 
             if (previewDummy != null)
             {
                 previewUtility.AddSingleGO(previewDummy);
-
-                if (previewLightsRoot != null)
-                {
-                    previewUtility.AddSingleGO(previewLightsRoot);
-                }
+                if (previewLightsRoot != null) previewUtility.AddSingleGO(previewLightsRoot);
 
                 previewUtility.camera.Render();
 
-                // 完全に保持されている、BeginPreview ～ EndPreview の「内側」で撮影を実行
                 if (!string.IsNullOrEmpty(pendingCapturePath))
                 {
                     CaptureCurrentPreviewInsideRenderLoop(pendingCapturePath);
@@ -585,21 +531,8 @@ public class VRC_ExpressionPreview : EditorWindow
         }
     }
 
-    private void SetupAndPoseDummy(VRC_ExpressionEditor editor)
+    private void EnsureDummyExists(VRC_ExpressionEditor editor)
     {
-        if (editor.rootObject == null) return;
-
-        AnimationClip editingClip = null;
-        if (editor.availableClips != null && editor.availableClips.Count > 0 && editor.selectedClipIndex < editor.availableClips.Count)
-            editingClip = editor.availableClips[editor.selectedClipIndex];
-
-        if (editor.testBaseClip != cachedTestBaseClip)
-        {
-            ResetPreviousAnimBlendShapes(testBaseClipCache);
-            cachedTestBaseClip = editor.testBaseClip;
-            UpdateTestBaseClipCache(editor.testBaseClip, editor);
-        }
-
         if (previewDummy == null)
         {
             Animator origAnim = editor.rootObject.GetComponent<Animator>();
@@ -621,13 +554,28 @@ public class VRC_ExpressionPreview : EditorWindow
 
             if (isAvatarChanged) { ResetCameraPivot(); isAvatarChanged = false; }
             FindAndCacheSceneLight();
-
             RebuildReplicaLights(editor);
             BuildMeshPairsCache(editor);
-
-            if (editor.testBaseClip != null) editor.testBaseClip.SampleAnimation(previewDummy, 0f);
-            if (editingClip != null) editingClip.SampleAnimation(previewDummy, 0f);
         }
+    }
+
+    private void SetupAndPoseDummy(VRC_ExpressionEditor editor)
+    {
+        EnsureDummyExists(editor);
+
+        AnimationClip editingClip = null;
+        if (editor.availableClips != null && editor.availableClips.Count > 0 && editor.selectedClipIndex < editor.availableClips.Count)
+            editingClip = editor.availableClips[editor.selectedClipIndex];
+
+        if (editor.testBaseClip != cachedTestBaseClip)
+        {
+            ResetPreviousAnimBlendShapes(testBaseClipCache);
+            cachedTestBaseClip = editor.testBaseClip;
+            UpdateTestBaseClipCache(editor.testBaseClip, editor);
+        }
+
+        // 全ループを廃止し、前回触ったキーだけを高速ピンポイントリセット
+        ResetModifiedBlendShapes();
 
         int pairCount = cachedMeshPairs.Count;
         for (int i = 0; i < pairCount; i++)
@@ -635,16 +583,16 @@ public class VRC_ExpressionPreview : EditorWindow
             var pair = cachedMeshPairs[i];
             var dummySmr = pair.dummySmr;
             string path = pair.relativePath;
-            if (dummySmr == null || dummySmr.sharedMesh != null) continue;
+            if (dummySmr == null || dummySmr.sharedMesh == null) continue;
 
             if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict))
-                foreach (var kvp in baseDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) dummySmr.SetBlendShapeWeight(index, kvp.Value);
+                foreach (var kvp in baseDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(dummySmr, index, kvp.Value);
 
             if (editor.testBaseClip != null && testBaseClipCache.TryGetValue(path, out var baseAnimDict))
-                foreach (var kvp in baseAnimDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) dummySmr.SetBlendShapeWeight(index, kvp.Value);
+                foreach (var kvp in baseAnimDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(dummySmr, index, kvp.Value);
 
             if (editor.clipExpressionValues.TryGetValue(path, out var clipDict))
-                foreach (var kvp in clipDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) dummySmr.SetBlendShapeWeight(index, kvp.Value);
+                foreach (var kvp in clipDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(dummySmr, index, kvp.Value);
         }
 
         if (editor.availableSmrs != null && editor.availableSmrs.Count > editor.selectedSmrIndex)
@@ -661,13 +609,13 @@ public class VRC_ExpressionPreview : EditorWindow
             if (found && activePair.dummySmr != null)
             {
                 foreach (var kvp in editor.currentExpressionValues)
-                    if (activePair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) activePair.dummySmr.SetBlendShapeWeight(index, kvp.Value);
+                    if (activePair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(activePair.dummySmr, index, kvp.Value);
 
                 if (editor.testShapeKeyIndex >= 0 && editor.testShapeKeyIndex < activePair.originalSmr.sharedMesh.blendShapeCount)
                 {
                     string testShapeName = activePair.originalSmr.sharedMesh.GetBlendShapeName(editor.testShapeKeyIndex);
                     if (activePair.shapeIndexMap.TryGetValue(testShapeName, out int index))
-                        activePair.dummySmr.SetBlendShapeWeight(index, editor.testShapeKeyValue);
+                        SetDummyWeight(activePair.dummySmr, index, editor.testShapeKeyValue);
                 }
             }
         }
@@ -706,7 +654,7 @@ public class VRC_ExpressionPreview : EditorWindow
     {
         cameraPivot = savedHeadLocalPosition + Vector3.up * 0.05f;
         cameraEuler = new Vector3(0, 180, 0);
-        cameraDistance = 0.40f; // 0.5f から 0.40f に変更（リセット時のカメラ距離）
+        cameraDistance = 0.40f;
         MarkPreviewDirty();
     }
 
@@ -792,11 +740,13 @@ public class VRC_ExpressionPreview : EditorWindow
 
         Color prevBg = GUI.backgroundColor;
         if (isComparing) GUI.backgroundColor = new Color(0.9f, 0.9f, 1f);
+
         EditorGUI.BeginChangeCheck();
         isComparing = GUILayout.Toggle(isComparing, "👁️ 比較 (ON/OFF)", GUI.skin.button, optH20);
         if (EditorGUI.EndChangeCheck())
         {
-            if (isComparing) { isMuted = false; CaptureNormalExpression(); ApplySnapshotDirectly(); } else RestoreNormalExpressionDirectly();
+            if (isComparing) isMuted = false;
+            MarkPreviewDirty();
             Repaint();
         }
         GUI.backgroundColor = prevBg;
@@ -807,7 +757,8 @@ public class VRC_ExpressionPreview : EditorWindow
         isMuted = GUILayout.Toggle(isMuted, "🔇 ミュート", GUI.skin.button, optH20);
         if (EditorGUI.EndChangeCheck())
         {
-            if (isMuted) { isComparing = false; CaptureNormalExpression(); ApplyMuteExpressionDirectly(editor); } else RestoreNormalExpressionDirectly();
+            if (isMuted) isComparing = false;
+            MarkPreviewDirty();
             Repaint();
         }
         GUI.backgroundColor = prevBgMute;
@@ -816,99 +767,169 @@ public class VRC_ExpressionPreview : EditorWindow
             if (EditorUtility.DisplayDialog("スナップショット復元", "保存時点に書き戻しますか？", "復元", "キャンセル")) RestoreSnapshot(editor);
 
         EditorGUILayout.EndHorizontal();
-        GUILayout.Label(snapshotSMRWeights.Count > 0 ? "※一時保存中..." : "※一時保存データはありません", EditorStyles.miniLabel);
+        GUILayout.Label(snapshotClipValues.Count > 0 ? "※一時保存中..." : "※一時保存データはありません", EditorStyles.miniLabel);
         GUILayout.EndVertical();
     }
 
     private void ApplyMuteExpressionDirectly(VRC_ExpressionEditor editor)
     {
         if (previewDummy == null || editor == null) return;
+
         int pairCount = cachedMeshPairs.Count;
         for (int i = 0; i < pairCount; i++)
         {
             var pair = cachedMeshPairs[i];
-            var dummySmr = pair.dummySmr; string path = pair.relativePath;
-            if (dummySmr == null || dummySmr.sharedMesh != null) continue;
-            if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict))
-                for (int j = 0; j < dummySmr.sharedMesh.blendShapeCount; j++) { baseDict.TryGetValue(dummySmr.sharedMesh.GetBlendShapeName(j), out float val); dummySmr.SetBlendShapeWeight(j, val); }
+            var dummySmr = pair.dummySmr;
+            string path = pair.relativePath;
+            if (dummySmr == null || dummySmr.sharedMesh == null) continue;
+
             if (editor.clipExpressionValues.TryGetValue(path, out var clipDict))
-                foreach (var kvp in clipDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int idx)) dummySmr.SetBlendShapeWeight(idx, 0f);
-        }
-        foreach (var path in editor.activeObjectValues.Keys) { Transform t = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path); if (t != null) t.gameObject.SetActive(false); }
-    }
+            {
+                foreach (var kvp in clipDict)
+                {
+                    if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index))
+                    {
+                        float originalValue = 0f;
+                        if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict)) baseDict.TryGetValue(kvp.Key, out originalValue);
+                        SetDummyWeight(dummySmr, index, originalValue);
+                    }
+                }
+            }
 
-    private void CaptureNormalExpression()
-    {
-        normalSMRWeights.Clear(); normalObjectActives.Clear(); if (previewDummy == null) return;
-        int count = cachedMeshPairs.Count;
-        for (int i = 0; i < count; i++)
+            if (editor.availableSmrs != null && editor.availableSmrs.Count > editor.selectedSmrIndex)
+            {
+                if (path == editor.GetRelativePath(editor.availableSmrs[editor.selectedSmrIndex].gameObject))
+                {
+                    foreach (var kvp in editor.currentExpressionValues)
+                    {
+                        if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index))
+                        {
+                            float originalValue = 0f;
+                            if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict)) baseDict.TryGetValue(kvp.Key, out originalValue);
+                            SetDummyWeight(dummySmr, index, originalValue);
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (var path in editor.activeObjectValues.Keys)
         {
-            var pair = cachedMeshPairs[i];
-            if (pair.dummySmr == null || pair.dummySmr.sharedMesh != null) continue;
-            float[] weights = new float[pair.dummySmr.sharedMesh.blendShapeCount];
-            for (int j = 0; j < weights.Length; j++) weights[j] = pair.dummySmr.GetBlendShapeWeight(j);
-            normalSMRWeights[pair.dummySmr] = weights;
+            Transform t = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path);
+            if (t != null) t.gameObject.SetActive(false);
         }
-        var editor = VRC_ExpressionEditor.Instance;
-        if (editor != null) foreach (var path in editor.activeObjectValues.Keys) { Transform t = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path); if (t != null) normalObjectActives[t.gameObject] = t.gameObject.activeSelf; }
-    }
-
-    private void RestoreNormalExpressionDirectly()
-    {
-        if (previewDummy == null || normalSMRWeights.Count == 0) return;
-        foreach (var kvp in normalSMRWeights) if (kvp.Key != null && kvp.Key.sharedMesh != null) for (int i = 0; i < kvp.Value.Length; i++) kvp.Key.SetBlendShapeWeight(i, kvp.Value[i]);
-        foreach (var kvp in normalObjectActives) if (kvp.Key != null) kvp.Key.SetActive(kvp.Value);
     }
 
     private void ApplySnapshotDirectly()
     {
         if (previewDummy == null || snapshotSMRWeights.Count == 0) return;
-        foreach (var kvp in snapshotSMRWeights) if (kvp.Key != null && kvp.Key.sharedMesh != null) for (int i = 0; i < kvp.Value.Length; i++) kvp.Key.SetBlendShapeWeight(i, kvp.Value[i]);
-        foreach (var kvp in snapshotObjectActives) if (kvp.Key != null) kvp.Key.SetActive(kvp.Value);
+        ResetModifiedBlendShapes();
+
+        int pairCount = cachedMeshPairs.Count;
+        for (int i = 0; i < pairCount; i++)
+        {
+            var pair = cachedMeshPairs[i];
+            if (snapshotSMRWeights.TryGetValue(pair.relativePath, out var snapDict))
+            {
+                if (pair.dummySmr != null)
+                {
+                    foreach (var kvp in snapDict) SetDummyWeight(pair.dummySmr, kvp.Key, kvp.Value);
+                }
+            }
+        }
+
+        foreach (var kvp in snapshotObjectActives)
+        {
+            Transform t = string.IsNullOrEmpty(kvp.Key) ? previewDummy.transform : previewDummy.transform.Find(kvp.Key);
+            if (t != null) t.gameObject.SetActive(kvp.Value);
+        }
     }
 
     private void TakeSnapshot(VRC_ExpressionEditor editor)
     {
-        snapshotCurves.Clear();
-        if (editor != null && editor.availableClips.Count > editor.selectedClipIndex)
+        snapshotClipValues.Clear();
+        if (editor != null && editor.clipExpressionValues != null)
         {
-            AnimationClip clip = editor.availableClips[editor.selectedClipIndex];
-            foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+            foreach (var kvp in editor.clipExpressionValues)
+                snapshotClipValues[kvp.Key] = new Dictionary<string, float>(kvp.Value);
+        }
+
+        snapshotClipActiveValues.Clear();
+        if (editor != null && editor.activeObjectValues != null)
+        {
+            foreach (var kvp in editor.activeObjectValues)
+                snapshotClipActiveValues[kvp.Key] = kvp.Value;
+        }
+
+        snapshotSMRWeights.Clear();
+        snapshotObjectActives.Clear();
+        if (previewDummy != null)
+        {
+            int count = cachedMeshPairs.Count;
+            for (int i = 0; i < count; i++)
             {
-                if (binding.propertyName.StartsWith("blendShape.") || (binding.type == typeof(GameObject) && binding.propertyName == "m_IsActive"))
+                var pair = cachedMeshPairs[i];
+                if (pair.dummySmr == null || pair.dummySmr.sharedMesh == null) continue;
+
+                var dict = new Dictionary<int, float>();
+                if (modifiedBlendShapes.TryGetValue(pair.dummySmr, out var indices))
                 {
-                    AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
-                    if (curve != null) snapshotCurves[binding] = new AnimationCurve(curve.keys);
+                    foreach (int idx in indices) dict[idx] = pair.dummySmr.GetBlendShapeWeight(idx);
+                }
+                snapshotSMRWeights[pair.relativePath] = dict;
+            }
+
+            if (editor != null && editor.activeObjectValues != null)
+            {
+                foreach (var path in editor.activeObjectValues.Keys)
+                {
+                    Transform t = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path);
+                    if (t != null) snapshotObjectActives[path] = t.gameObject.activeSelf;
                 }
             }
         }
-        snapshotSMRWeights.Clear(); snapshotObjectActives.Clear();
-        if (previewDummy == null) return;
-
-        int count = cachedMeshPairs.Count;
-        for (int i = 0; i < count; i++)
-        {
-            var pair = cachedMeshPairs[i];
-            if (pair.dummySmr == null || pair.dummySmr.sharedMesh != null) continue;
-            float[] weights = new float[pair.dummySmr.sharedMesh.blendShapeCount];
-            for (int j = 0; j < weights.Length; j++) weights[j] = pair.dummySmr.GetBlendShapeWeight(j);
-            snapshotSMRWeights[pair.dummySmr] = weights;
-        }
-
-        if (editor != null) foreach (var path in editor.activeObjectValues.Keys) { Transform t = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path); if (t != null) snapshotObjectActives[t.gameObject] = t.gameObject.activeSelf; }
+        Debug.Log("<color=cyan>[表情エディタ]</color> スナップショットを一時保存しました。");
     }
 
     private void RestoreSnapshot(VRC_ExpressionEditor editor)
     {
-        if (snapshotCurves.Count == 0 || editor == null || editor.availableClips.Count <= editor.selectedClipIndex) return;
+        if (snapshotClipValues.Count == 0 || editor == null || editor.availableClips.Count <= editor.selectedClipIndex) return;
         AnimationClip clip = editor.availableClips[editor.selectedClipIndex];
-        int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("スナップショットから復元"); Undo.RecordObject(clip, "スナップショットから復元");
+
+        int group = Undo.GetCurrentGroup();
+        Undo.SetCurrentGroupName("スナップショットから復元");
+        Undo.RecordObject(clip, "スナップショットから復元");
+
         foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+        {
             if (binding.propertyName.StartsWith("blendShape.") || (binding.type == typeof(GameObject) && binding.propertyName == "m_IsActive"))
+            {
                 AnimationUtility.SetEditorCurve(clip, binding, null);
-        foreach (var kvp in snapshotCurves) AnimationUtility.SetEditorCurve(clip, kvp.Key, kvp.Value);
+            }
+        }
+
+        foreach (var pathKvp in snapshotClipValues)
+        {
+            string path = pathKvp.Key;
+            foreach (var shapeKvp in pathKvp.Value)
+            {
+                var binding = EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeKvp.Key);
+                var curve = new AnimationCurve(new Keyframe(0f, shapeKvp.Value));
+                AnimationUtility.SetEditorCurve(clip, binding, curve);
+            }
+        }
+
+        foreach (var kvp in snapshotClipActiveValues)
+        {
+            var binding = EditorCurveBinding.FloatCurve(kvp.Key, typeof(GameObject), "m_IsActive");
+            var curve = new AnimationCurve(new Keyframe(0f, kvp.Value ? 1f : 0f));
+            AnimationUtility.SetEditorCurve(clip, binding, curve);
+        }
+
         Undo.CollapseUndoOperations(group);
-        editor.RefreshExpressionCache(); editor.ApplySorting(); editor.ForceRepaintPreview();
+        editor.RefreshExpressionCache();
+        editor.ApplySorting();
+        editor.ForceRepaintPreview();
     }
 
     private void DrawIconCapturePanel(VRC_ExpressionEditor editor)
@@ -916,7 +937,27 @@ public class VRC_ExpressionPreview : EditorWindow
         GUILayout.BeginVertical(GUI.skin.box); GUILayout.Label("アイコン撮影 (透過PNG)", EditorStyles.boldLabel);
         EditorGUILayout.BeginHorizontal(); GUILayout.Label("保存先:", optW45);
         string currentPath = (editor != null && editor.GetSettings() != null) ? editor.GetSettings().lastIconSavePath : "Assets";
+        if (string.IsNullOrEmpty(currentPath)) currentPath = "Assets";
+
         GUILayout.Label(currentPath, EditorStyles.helpBox, optExpandTrue);
+
+        // ★【新機能】Projectウィンドウで保存先フォルダをピン留め(Ping)してフォーカスする検索ボタン
+        GUIContent searchIcon = EditorGUIUtility.IconContent("d_Search Icon");
+        searchIcon.tooltip = "この保存先フォルダの位置をProjectウィンドウで表示します";
+        if (GUILayout.Button(searchIcon, GUILayout.Width(28), GUILayout.Height(18)))
+        {
+            Object folderObject = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(currentPath);
+            if (folderObject != null)
+            {
+                EditorGUIUtility.PingObject(folderObject);
+                Selection.activeObject = folderObject;
+            }
+            else
+            {
+                Debug.LogWarning($"<color=cyan>[表情エディタ]</color> フォルダが見つかりませんでした: {currentPath}");
+            }
+        }
+
         if (GUILayout.Button("変更", optW45))
         {
             string absPath = EditorUtility.OpenFolderPanel("保存先フォルダを選択", currentPath, "");
@@ -928,7 +969,18 @@ public class VRC_ExpressionPreview : EditorWindow
         EditorGUILayout.EndHorizontal();
         EditorGUILayout.BeginHorizontal();
         GUI.backgroundColor = new Color(0.7f, 1f, 1f);
-        if (GUILayout.Button("📷 透過PNGで撮影", optH26)) CaptureIconAndSave(editor, currentPath);
+
+        if (GUILayout.Button("📷 透過PNGで撮影", optH26))
+        {
+            string clipName = (editor != null && editor.availableClips != null && editor.selectedClipIndex < editor.availableClips.Count) ? editor.availableClips[editor.selectedClipIndex].name : "ExpressionIcon";
+            string savePath = "";
+            for (int i = 0; i < 1000; i++)
+            {
+                savePath = $"{currentPath}/{clipName}{(i == 0 ? "" : $"_{i}")}.png";
+                if (!System.IO.File.Exists(savePath)) break;
+            }
+            RequestCapture(savePath);
+        }
         GUI.backgroundColor = Color.white;
         if (GUILayout.Button(resizeIconContent, optW28, optH26)) OptimizeWindowSize();
         EditorGUILayout.EndHorizontal();
@@ -944,39 +996,6 @@ public class VRC_ExpressionPreview : EditorWindow
         this.position = new Rect(currentRect.x, currentRect.y, targetWidth, targetHeight);
     }
 
-    private void CaptureIconAndSave(VRC_ExpressionEditor editor, string folderPath)
-    {
-        if (previewUtility == null || previewDummy == null) return;
-        string clipName = (editor != null && editor.availableClips != null && editor.availableClips.Count > editor.selectedClipIndex) ? editor.availableClips[editor.selectedClipIndex].name : "ExpressionIcon";
-        string savePath = "";
-        for (int i = 0; i < 1000; i++) { savePath = $"{folderPath}/{clipName}{(i == 0 ? "" : $"_{i}")}.png"; if (!System.IO.File.Exists(savePath)) break; }
-
-        var cam = previewUtility.camera;
-        var oldClearFlags = cam.clearFlags; var oldBgColor = cam.backgroundColor;
-        cam.clearFlags = CameraClearFlags.SolidColor; cam.backgroundColor = new Color(0, 0, 0, 0);
-
-        int size = 256; RenderTexture rt = new RenderTexture(size, size, 24, RenderTextureFormat.ARGB32);
-        var oldTarget = cam.targetTexture; cam.targetTexture = rt;
-        cam.Render();
-        RenderTexture.active = rt; Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
-        tex.ReadPixels(new Rect(0, 0, size, size), 0, 0); tex.Apply();
-
-        RenderTexture.active = null; cam.targetTexture = oldTarget; cam.clearFlags = oldClearFlags; cam.backgroundColor = oldBgColor;
-        DestroyImmediate(rt);
-        System.IO.File.WriteAllBytes(savePath, tex.EncodeToPNG()); DestroyImmediate(tex);
-
-        AssetDatabase.ImportAsset(savePath);
-        if (AssetImporter.GetAtPath(savePath) as TextureImporter is TextureImporter importer)
-        {
-            importer.textureType = TextureImporterType.Sprite; importer.spriteImportMode = SpriteImportMode.Single;
-            importer.mipmapEnabled = false; importer.alphaIsTransparency = true; importer.SaveAndReimport();
-        }
-        AssetDatabase.Refresh();
-    }
-
-    /// <summary>
-    /// 一覧用の撮影リクエストを受け付け、次のRepaintの適切なタイミングで処理を要求します。
-    /// </summary>
     public void RequestCapture(string path)
     {
         pendingCapturePath = path;
@@ -984,15 +1003,10 @@ public class VRC_ExpressionPreview : EditorWindow
         Repaint();
     }
 
-    /// <summary>
-    /// ★修正：BeginPreview ～ EndPreview のレンダリングサイクル「内側」で動作し、
-    /// 新しくアバター階層のサブフォルダーが追加されても物理フォルダを安全に自動生成し、
-    /// 絶対パス（Application.dataPathベース）を用いて100%クラッシュなく保存を行います。
-    /// </summary>
     private void CaptureCurrentPreviewInsideRenderLoop(string savePath)
     {
         var cam = previewUtility.camera;
-        int size = 256; // 128から256に拡張（美しく縮小表示させるため）
+        int size = 256;
         RenderTexture rt = new RenderTexture(size, size, 24, RenderTextureFormat.ARGB32);
 
         var oldTarget = cam.targetTexture;
@@ -1001,7 +1015,7 @@ public class VRC_ExpressionPreview : EditorWindow
 
         cam.targetTexture = rt;
         cam.clearFlags = CameraClearFlags.SolidColor;
-        cam.backgroundColor = new Color(0, 0, 0, 0); // 透過
+        cam.backgroundColor = new Color(0, 0, 0, 0);
 
         cam.Render();
 
@@ -1016,26 +1030,18 @@ public class VRC_ExpressionPreview : EditorWindow
         cam.backgroundColor = oldBgColor;
         DestroyImmediate(rt);
 
-        // ★絶対パスをOS基準のフルパスに100%安全に統一します
         string absolutePath = System.IO.Path.GetFullPath(Application.dataPath + savePath.Substring("Assets".Length));
-
-        // ★親フォルダの物理的な存在を保証（自動生成）
         string directory = System.IO.Path.GetDirectoryName(absolutePath);
         if (!System.IO.Directory.Exists(directory))
         {
             System.IO.Directory.CreateDirectory(directory);
-
-            // ★超重要：Unity側に、新規作成された「親フォルダアセット」自体の存在を登録（インポート同期）させます。
-            // これがないと、フォルダ作成直後の AssetDatabase.ImportAsset(savePath) が空振りに終わります。
             string relativeDir = System.IO.Path.GetDirectoryName(savePath).Replace("\\", "/");
             AssetDatabase.ImportAsset(relativeDir);
         }
 
-        // 絶対パスへ物理書き出し
         System.IO.File.WriteAllBytes(absolutePath, tex.EncodeToPNG());
         DestroyImmediate(tex);
 
-        // Unityへのインポート通知は相対パスで行う
         AssetDatabase.ImportAsset(savePath);
         if (AssetImporter.GetAtPath(savePath) as TextureImporter is TextureImporter importer)
         {
@@ -1058,9 +1064,12 @@ public class VRC_ExpressionPreview : EditorWindow
         if (previewUtility == null)
         {
             previewUtility = new PreviewRenderUtility();
-            previewUtility.camera.cullingMask = -1; previewUtility.camera.fieldOfView = 30f;
-            previewUtility.camera.nearClipPlane = 0.01f; previewUtility.camera.farClipPlane = 50f;
-            previewUtility.camera.backgroundColor = new Color(0.19f, 0.19f, 0.19f, 1f); previewUtility.camera.clearFlags = CameraClearFlags.SolidColor;
+            previewUtility.camera.cullingMask = -1;
+            previewUtility.camera.fieldOfView = 30f;
+            previewUtility.camera.nearClipPlane = 0.01f;
+            previewUtility.camera.farClipPlane = 50f;
+            previewUtility.camera.backgroundColor = new Color(0.19f, 0.19f, 0.19f, 1f);
+            previewUtility.camera.clearFlags = CameraClearFlags.SolidColor;
         }
     }
 }

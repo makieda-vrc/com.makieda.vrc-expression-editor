@@ -127,7 +127,15 @@ public class VRC_ExpressionEditor : EditorWindow
     private class ActiveObjectCache { public string path; public GUIContent content; }
     private List<ActiveObjectCache> cachedActiveObjects = new List<ActiveObjectCache>();
 
-    public bool IsDraggingSlider() => GUIUtility.hotControl != 0;
+    public bool IsDraggingSlider()
+    {
+        // 現在フォーカスがある（アクティブな）ウィンドウが、このメイン画面ではないなら、
+        // スライダーを操作しているはずがないので、強制的に「操作中ではない(false)」と判定する
+        if (EditorWindow.focusedWindow != this) return false;
+
+        // メイン画面がアクティブな時だけ、つかみ判定（hotControl）をチェックする
+        return GUIUtility.hotControl != 0;
+    }
 
     [MenuItem("Tools/VRChat/1F表情エディタを開く")]
     public static void OpenBothWindows()
