@@ -137,7 +137,7 @@ public class VRC_ExpressionEditor : EditorWindow
         return GUIUtility.hotControl != 0;
     }
 
-    [MenuItem("Tools/VRChat/1F表情エディタを開く")]
+    [MenuItem("Tools/VRC Expression Editor")]
     public static void OpenBothWindows()
     {
         Instance = GetWindow<VRC_ExpressionEditor>("表情エディタ");
