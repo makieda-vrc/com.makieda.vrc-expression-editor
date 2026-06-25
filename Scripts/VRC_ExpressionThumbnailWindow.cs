@@ -15,18 +15,21 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
 
     private GUIStyle centerLockStyle;
     private GUIStyle labelStyle;
-    private GUIStyle emptyBoxStyle; // 枠なし密着用スタイル
+    private GUIStyle detailLabelStyle;
+    private GUIStyle emptyBoxStyle;
 
     private const float MIN_SPACING = 0f;
-    private const float LABEL_HEIGHT = 20f; // ラベルの高さ固定値
+    private const float TITLE_HEIGHT = 18f;
+    private const float DETAIL_HEIGHT = 12f;
 
     private float lastWindowWidth;
     private float lastSizeScale;
+    private bool lastShowDetail;
     private int cachedColumnCount = 1;
     private float cachedSpacing = 0f;
 
     private int lastHotControl = 0;
-    private bool isScaleDirty = false;
+    private bool isSettingDirty = false;
 
     private float sizeScaleFloat
     {
@@ -53,7 +56,32 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
                 {
                     settings.thumbnailSizeScale = intValue;
                     EditorUtility.SetDirty(settings);
-                    isScaleDirty = true;
+                    isSettingDirty = true;
+                }
+            }
+        }
+    }
+
+    private bool showDetailInfo
+    {
+        get
+        {
+            var editor = VRC_ExpressionEditor.Instance;
+            if (editor != null && editor.GetSettings() != null)
+                return editor.GetSettings().showDetailInfo;
+            return false;
+        }
+        set
+        {
+            var editor = VRC_ExpressionEditor.Instance;
+            if (editor != null && editor.GetSettings() != null)
+            {
+                var settings = editor.GetSettings();
+                if (settings.showDetailInfo != value)
+                {
+                    settings.showDetailInfo = value;
+                    EditorUtility.SetDirty(settings);
+                    isSettingDirty = true;
                 }
             }
         }
@@ -72,7 +100,7 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
         thumbnailCache.Clear();
         clipPathCache.Clear();
         ResetLayoutCache();
-        isScaleDirty = false;
+        isSettingDirty = false;
         lastFxGuid = null;
     }
 
@@ -82,10 +110,10 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
         thumbnailCache.Clear();
         clipPathCache.Clear();
 
-        if (isScaleDirty)
+        if (isSettingDirty)
         {
             AssetDatabase.SaveAssets();
-            isScaleDirty = false;
+            isSettingDirty = false;
         }
     }
 
@@ -93,32 +121,37 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
     {
         lastWindowWidth = -1f;
         lastSizeScale = -1f;
+        lastShowDetail = false;
     }
 
     private void InitializeStyles()
     {
         if (centerLockStyle == null)
         {
-            centerLockStyle = new GUIStyle(EditorStyles.boldLabel)
-            {
-                alignment = TextAnchor.MiddleCenter,
-                fontSize = 14,
-                wordWrap = true
-            };
+            centerLockStyle = new GUIStyle(EditorStyles.boldLabel) { alignment = TextAnchor.MiddleCenter, fontSize = 14, wordWrap = true };
 
-            // ラベル設定：文字サイズ15 / 高さ15 / 余白ゼロ
             labelStyle = new GUIStyle(EditorStyles.label)
             {
                 alignment = TextAnchor.MiddleCenter,
                 clipping = TextClipping.Clip,
-                fixedHeight = LABEL_HEIGHT,
-                fontSize = 15,
+                fixedHeight = TITLE_HEIGHT,
+                fontSize = 14,
                 padding = new RectOffset(0, 0, 0, 0),
                 margin = new RectOffset(0, 0, 0, 0)
             };
             labelStyle.normal.textColor = Color.white;
 
-            // 密着用コンテナ設定
+            detailLabelStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                clipping = TextClipping.Clip,
+                fixedHeight = DETAIL_HEIGHT,
+                fontSize = 10,
+                padding = new RectOffset(0, 0, 0, 0),
+                margin = new RectOffset(0, 0, 0, 0)
+            };
+            detailLabelStyle.normal.textColor = new Color(0.8f, 0.8f, 0.8f, 1f);
+
             emptyBoxStyle = new GUIStyle();
             emptyBoxStyle.margin = new RectOffset(0, 0, 0, 0);
             emptyBoxStyle.padding = new RectOffset(0, 0, 0, 0);
@@ -160,12 +193,6 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
             return;
         }
 
-        if (editor.availableClips == null || editor.availableClips.Count == 0)
-        {
-            EditorGUILayout.HelpBox("表示可能なアニメーションがありません。", MessageType.Info);
-            return;
-        }
-
         string currentFxGuid = editor.GetAvatarID();
         if (string.IsNullOrEmpty(currentFxGuid)) currentFxGuid = "DefaultFX";
 
@@ -181,25 +208,27 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
 
         float currentWidth = position.width;
         float currentScale = sizeScaleFloat;
+        bool currentShowDetail = showDetailInfo;
 
-        // 右端の隙間を消すため、スクロールバー分(15px)だけを引いた幅を使用
         float windowWidth = currentWidth - 15f;
         if (windowWidth < 50f) windowWidth = 50f;
 
         float itemSize = 128f * currentScale;
 
-        if (!Mathf.Approximately(currentWidth, lastWindowWidth) || !Mathf.Approximately(currentScale, lastSizeScale))
+        if (!Mathf.Approximately(currentWidth, lastWindowWidth) || !Mathf.Approximately(currentScale, lastSizeScale) || currentShowDetail != lastShowDetail)
         {
             UpdateLayoutCalculations(windowWidth, itemSize);
             lastWindowWidth = currentWidth;
             lastSizeScale = currentScale;
+            lastShowDetail = currentShowDetail;
         }
 
         int clipCount = editor.availableClips.Count;
         int rowCount = Mathf.CeilToInt((float)clipCount / cachedColumnCount);
 
-        // 1行の高さ = アイテム横幅(正方形) + ラベル高さ(15px)
-        float rowHeight = itemSize + LABEL_HEIGHT;
+        float labelAreaHeight = TITLE_HEIGHT + (currentShowDetail ? DETAIL_HEIGHT : 0f);
+        float rowHeight = itemSize + labelAreaHeight;
+
         float viewTop = scrollPos.y;
         float viewBottom = scrollPos.y + position.height;
 
@@ -214,48 +243,38 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
                 continue;
             }
 
-            // BeginHorizontalにGUIStyle.noneを指定して隙間をゼロにする
             EditorGUILayout.BeginHorizontal(GUIStyle.none, GUILayout.Height(rowHeight));
 
             for (int c = 0; c < cachedColumnCount; c++)
             {
                 int index = r * cachedColumnCount + c;
-                if (index >= clipCount)
-                {
-                    GUILayout.FlexibleSpace();
-                    break;
-                }
+                if (index >= clipCount) { GUILayout.FlexibleSpace(); break; }
 
                 AnimationClip clip = editor.availableClips[index];
                 if (clip == null) continue;
 
-                DrawThumbnailItem(editor, clip, index, itemSize, currentFxGuid);
+                DrawThumbnailItem(editor, clip, index, itemSize, currentFxGuid, currentShowDetail, labelAreaHeight);
 
-                if (c < cachedColumnCount - 1 && index < clipCount - 1)
-                {
-                    GUILayout.Space(cachedSpacing);
-                }
+                if (c < cachedColumnCount - 1 && index < clipCount - 1) GUILayout.Space(cachedSpacing);
             }
             EditorGUILayout.EndHorizontal();
         }
 
         EditorGUILayout.EndScrollView();
-
         DrawScaleToggle();
 
-        // 保存検知ロジック
         bool isOperating = (GUIUtility.hotControl != 0 || EditorGUIUtility.editingTextField);
-        if (!isOperating && isScaleDirty)
+        if (!isOperating && isSettingDirty)
         {
             AssetDatabase.SaveAssets();
-            isScaleDirty = false;
+            isSettingDirty = false;
         }
         lastHotControl = GUIUtility.hotControl;
     }
 
     private void DrawScaleToggle()
     {
-        float areaWidth = 200f;
+        float areaWidth = 230f;
         float areaHeight = 18f;
         Rect toggleRect = new Rect(position.width - areaWidth - 6f, position.height - areaHeight - 6f, areaWidth, areaHeight);
 
@@ -263,10 +282,20 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
 
         float currentScale = sizeScaleFloat;
         float nextScale = currentScale;
+        bool nextShowDetail = showDetailInfo;
 
-        Rect btnRect = new Rect(toggleRect.x, toggleRect.y, 32f, areaHeight);
+        Rect detailBtnRect = new Rect(toggleRect.x, toggleRect.y, 24f, areaHeight);
+        Rect btnRect = new Rect(detailBtnRect.xMax + 4f, toggleRect.y, 32f, areaHeight);
         Rect sliderRect = new Rect(btnRect.xMax + 4f, toggleRect.y, 114f, areaHeight);
         Rect fieldRect = new Rect(sliderRect.xMax + 4f, toggleRect.y, 46f, areaHeight);
+
+        Color oldBg = GUI.backgroundColor;
+        if (nextShowDetail) GUI.backgroundColor = new Color(0.6f, 1f, 0.6f);
+        if (GUI.Button(detailBtnRect, new GUIContent("S", "詳細情報（レイヤー/ステート名）を表示切替"), EditorStyles.miniButton))
+        {
+            nextShowDetail = !nextShowDetail;
+        }
+        GUI.backgroundColor = oldBg;
 
         if (GUI.Button(btnRect, "x1", EditorStyles.miniButton))
         {
@@ -278,19 +307,13 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
 
         EditorGUI.BeginChangeCheck();
         float inputScale = EditorGUI.DelayedFloatField(fieldRect, nextScale);
-        if (EditorGUI.EndChangeCheck())
-        {
-            nextScale = Mathf.Clamp(inputScale, 0.5f, 1.5f);
-        }
+        if (EditorGUI.EndChangeCheck()) nextScale = Mathf.Clamp(inputScale, 0.5f, 1.5f);
 
-        if (!Mathf.Approximately(nextScale, currentScale))
-        {
-            sizeScaleFloat = nextScale;
-            Repaint();
-        }
+        if (!Mathf.Approximately(nextScale, currentScale)) { sizeScaleFloat = nextScale; Repaint(); }
+        if (nextShowDetail != showDetailInfo) { showDetailInfo = nextShowDetail; Repaint(); }
     }
 
-    private void DrawThumbnailItem(VRC_ExpressionEditor editor, AnimationClip clip, int index, float size, string fxGuid)
+    private void DrawThumbnailItem(VRC_ExpressionEditor editor, AnimationClip clip, int index, float size, string fxGuid, bool showDetail, float labelAreaHeight)
     {
         if (!clipPathCache.TryGetValue(clip, out string savePath))
         {
@@ -306,32 +329,38 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
             if (thumbSprite != null) thumbnailCache[savePath] = thumbSprite;
         }
 
+        string tooltip = "";
+        string detailLine = "";
+        if (editor.clipLocationCache.TryGetValue(clip, out List<string> locations))
+        {
+            tooltip = string.Join("\n", locations);
+            if (locations.Count > 0)
+            {
+                string suffix = (locations.Count > 1) ? "..." : "";
+                detailLine = "[" + locations[0] + suffix + "]";
+            }
+        }
+
         bool isSelected = (editor.selectedClipIndex == index);
+        Rect totalRect = EditorGUILayout.BeginVertical(emptyBoxStyle, GUILayout.Width(size), GUILayout.Height(size + labelAreaHeight));
 
-        // コンテナ開始（完全に余白ゼロ）
-        Rect totalRect = EditorGUILayout.BeginVertical(emptyBoxStyle, GUILayout.Width(size), GUILayout.Height(size + LABEL_HEIGHT));
+        GUI.contentColor = Color.white;
+        GUIContent content = new GUIContent("", tooltip);
+        GUI.Label(totalRect, content);
 
-        // 選択ハイライト描画
-        if (isSelected)
-        {
-            EditorGUI.DrawRect(totalRect, new Color(0.4f, 0.8f, 1f, 0.4f));
-        }
+        if (isSelected) EditorGUI.DrawRect(totalRect, new Color(0.4f, 0.8f, 1f, 0.4f));
 
-        // 画像描画エリア
         Rect imgRect = GUILayoutUtility.GetRect(size, size);
-        if (thumbSprite != null)
+        if (thumbSprite != null) GUI.DrawTexture(imgRect, thumbSprite.texture, ScaleMode.ScaleToFit);
+        else EditorGUI.DrawRect(imgRect, new Color(0.25f, 0.25f, 0.25f, 1f));
+
+        GUILayout.Label(clip.name, labelStyle, GUILayout.Width(size), GUILayout.Height(TITLE_HEIGHT));
+
+        if (showDetail)
         {
-            GUI.DrawTexture(imgRect, thumbSprite.texture, ScaleMode.ScaleToFit);
-        }
-        else
-        {
-            EditorGUI.DrawRect(imgRect, new Color(0.25f, 0.25f, 0.25f, 1f));
+            GUILayout.Label(detailLine, detailLabelStyle, GUILayout.Width(size), GUILayout.Height(DETAIL_HEIGHT));
         }
 
-        // ラベル描画（固定高さ15px）
-        GUILayout.Label(clip.name, labelStyle, GUILayout.Width(size), GUILayout.Height(LABEL_HEIGHT));
-
-        // クリックイベント
         if (Event.current.type == EventType.MouseDown && totalRect.Contains(Event.current.mousePosition))
         {
             if (editor.selectedClipIndex != index || thumbSprite == null)
@@ -345,13 +374,15 @@ public class VRC_ExpressionThumbnailWindow : EditorWindow
                 editor.ApplySorting();
                 editor.ForceRepaintPreview();
 
+                // 【重要】メインエディタに再描画を命じる
+                editor.Repaint();
+
                 if (thumbSprite == null && VRC_ExpressionPreview.Instance != null)
                     VRC_ExpressionPreview.Instance.RequestCapture(savePath);
             }
             Event.current.Use();
         }
 
-        // コンテキストメニュー
         if (Event.current.type == EventType.ContextClick && totalRect.Contains(Event.current.mousePosition))
         {
             GenericMenu menu = new GenericMenu();

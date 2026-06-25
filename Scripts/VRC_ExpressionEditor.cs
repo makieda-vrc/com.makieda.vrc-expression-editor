@@ -22,6 +22,10 @@ public class VRC_ExpressionEditor : EditorWindow
     public Dictionary<SkinnedMeshRenderer, string> smrPathCache = new Dictionary<SkinnedMeshRenderer, string>();
 
     public List<AnimationClip> availableClips = new List<AnimationClip>();
+
+    // 【新機能】クリップがどのレイヤーのどのステートにあるかを記録する辞書
+    public Dictionary<AnimationClip, List<string>> clipLocationCache = new Dictionary<AnimationClip, List<string>>();
+
     public int selectedClipIndex = 0;
     public int selectedSmrIndex = 0;
     public AnimationClip referenceClip;
@@ -90,7 +94,7 @@ public class VRC_ExpressionEditor : EditorWindow
     private GUIContent cachedFavOffContent;
     private GUIContent warnIconContent;
     private GUIContent trashIconContent;
-    private GUIContent gridIconContent; // ★サムネ一覧トグルアイコン用
+    private GUIContent gridIconContent;
     private GUIContent createIconContent;
     private GUIContent openIconContent;
     private GUIContent linkIconContent;
@@ -171,12 +175,9 @@ public class VRC_ExpressionEditor : EditorWindow
         EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
         UnityEditor.SceneManagement.EditorSceneManager.sceneOpened -= OnSceneOpened;
 
-        // ★修正：再生時の誤クローズを防ぐため、OnDisableでの連動クローズ処理は廃止し、OnDestroy（物理破棄）へ移動しました
-
         SaveCurrentSettings();
     }
 
-    // ★追加：ウィンドウが「✕」ボタンで完全に物理破棄された時のみ、連動して閉じます
     private void OnDestroy()
     {
         if (VRC_ExpressionThumbnailWindow.Instance != null)
@@ -430,11 +431,12 @@ public class VRC_ExpressionEditor : EditorWindow
         if (manuallyCreatedClips == null) manuallyCreatedClips = new List<AnimationClip>();
         if (availableSmrs == null) availableSmrs = new List<SkinnedMeshRenderer>();
         if (availableClips == null) availableClips = new List<AnimationClip>();
+        if (clipLocationCache == null) clipLocationCache = new Dictionary<AnimationClip, List<string>>();
         if (cachedControllers == null) cachedControllers = new List<AnimatorController>();
         if (layerNames == null) layerNames = new List<string>();
         if (selectedLayers == null) selectedLayers = new bool[0];
         if (detailFilterWords == null) detailFilterWords = new List<string>();
-        if (detailFilterActives == null) detailFilterActives = new List<bool>(); // ★等価比較(==)に修正
+        if (detailFilterActives == null) detailFilterActives = new List<bool>();
         if (sortedShapeKeyNames == null) sortedShapeKeyNames = new List<string>();
         if (cachedShapeContents == null) cachedShapeContents = new GUIContent[0];
         if (cachedActiveObjects == null) cachedActiveObjects = new List<ActiveObjectCache>();
@@ -537,9 +539,8 @@ public class VRC_ExpressionEditor : EditorWindow
             }
         }
 
-        // ★追加箇所：ゴミ箱と新規作成の間に「グリッドアイコン（サムネ一覧）」ボタンを配置
         bool isThumbWindowOpen = VRC_ExpressionThumbnailWindow.Instance != null;
-        if (isThumbWindowOpen) GUI.backgroundColor = new Color(0.7f, 0.9f, 1f); // 開いている時は青っぽくハイライト
+        if (isThumbWindowOpen) GUI.backgroundColor = new Color(0.7f, 0.9f, 1f);
         if (GUILayout.Button(gridIconContent, optW24, optH18))
         {
             if (isThumbWindowOpen)
@@ -687,7 +688,6 @@ public class VRC_ExpressionEditor : EditorWindow
         float labelWidth = Mathf.Clamp(viewWidth * 0.40f, 75f, Mathf.Min(cachedMaxShapeNameWidth, labelLimitWidth));
         if (lastShapeLabelW != labelWidth) { lastShapeLabelW = labelWidth; optShapeLabelW = GUILayout.Width(labelWidth); }
 
-        // 追加：再生から戻った際などの配列のサイズ不整合エラーを絶対に防ぐ
         if (cachedShapeContents == null || cachedShapeContents.Length != sortedShapeKeyNames.Count)
         {
             cachedShapeContents = new GUIContent[sortedShapeKeyNames.Count];
@@ -811,7 +811,6 @@ public class VRC_ExpressionEditor : EditorWindow
         if (GUILayout.Button(jumpUpIconContent, optW20, optH18)) leftScrollPos.y = 0f;
         EditorGUILayout.EndHorizontal();
 
-        // 追加：再生から戻った際などの、オブジェクトリストのサイズ不整合エラーを絶対に防ぐ
         if (cachedActiveObjects == null || cachedActiveObjects.Count != activeObjectValues.Count)
         {
             RecalculateObjNameWidth();
@@ -1092,13 +1091,18 @@ public class VRC_ExpressionEditor : EditorWindow
         string lastClipName = (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0) ? availableClips[selectedClipIndex].name : "";
         HashSet<AnimationClip> clipSet = new HashSet<AnimationClip>();
 
+        clipLocationCache.Clear();
+
         int layerIdx = 0;
         foreach (var ctrl in cachedControllers)
         {
             for (int i = 0; i < ctrl.layers.Length; i++)
             {
                 if (layerIdx < selectedLayers.Length && selectedLayers[layerIdx])
-                    ExtractClipsFromStateMachine(ctrl.layers[i].stateMachine, clipSet);
+                {
+                    var layer = ctrl.layers[i];
+                    ExtractClipsFromStateMachine(layer.stateMachine, clipSet, layer.name);
+                }
                 layerIdx++;
             }
         }
@@ -1185,8 +1189,48 @@ public class VRC_ExpressionEditor : EditorWindow
         cachedMaxShapeNameWidth += 10f;
     }
 
-    private void ExtractClipsFromStateMachine(AnimatorStateMachine sm, HashSet<AnimationClip> clipSet) { if (sm == null) return; foreach (var state in sm.states) ExtractClipsFromMotion(state.state.motion, clipSet); foreach (var subSm in sm.stateMachines) ExtractClipsFromStateMachine(subSm.stateMachine, clipSet); }
-    private void ExtractClipsFromMotion(Motion motion, HashSet<AnimationClip> clipSet) { if (motion is AnimationClip clip) clipSet.Add(clip); else if (motion is BlendTree tree) foreach (var child in tree.children) ExtractClipsFromMotion(child.motion, clipSet); }
+    private void ExtractClipsFromStateMachine(AnimatorStateMachine sm, HashSet<AnimationClip> clipSet, string layerName)
+    {
+        if (sm == null) return;
+        foreach (var state in sm.states)
+        {
+            ExtractClipsFromMotion(state.state.motion, clipSet, layerName, state.state.name);
+        }
+        foreach (var subSm in sm.stateMachines)
+        {
+            ExtractClipsFromStateMachine(subSm.stateMachine, clipSet, layerName);
+        }
+    }
+
+    private void ExtractClipsFromMotion(Motion motion, HashSet<AnimationClip> clipSet, string layerName, string stateName)
+    {
+        if (motion == null) return;
+        if (motion is AnimationClip clip)
+        {
+            clipSet.Add(clip);
+            RegisterClipLocation(clip, layerName, stateName);
+        }
+        else if (motion is BlendTree tree)
+        {
+            foreach (var child in tree.children)
+            {
+                ExtractClipsFromMotion(child.motion, clipSet, layerName, stateName);
+            }
+        }
+    }
+
+    private void RegisterClipLocation(AnimationClip clip, string layerName, string stateName)
+    {
+        if (!clipLocationCache.ContainsKey(clip))
+        {
+            clipLocationCache[clip] = new List<string>();
+        }
+        string locationInfo = $"{layerName} / {stateName}";
+        if (!clipLocationCache[clip].Contains(locationInfo))
+        {
+            clipLocationCache[clip].Add(locationInfo);
+        }
+    }
 
     private void CreateNewAnimationClip()
     {
