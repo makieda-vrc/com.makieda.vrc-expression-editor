@@ -612,7 +612,7 @@ public class VRC_ExpressionEditor : EditorWindow
         GUI.backgroundColor = oldBg;
 
         Rect jumpRect = new Rect(row4Rect.x + rowWidth - 20f, row4Rect.y, 20f, 18);
-        if (GUI.Button(jumpRect, jumpDownIconContent)) leftScrollPos.y = 99999f;
+        if (GUI.Button(jumpRect, jumpDownIconContent)) rightScrollPos.y = 99999f;
 
         if (isCopyPasteMode)
         {
@@ -823,7 +823,7 @@ public class VRC_ExpressionEditor : EditorWindow
         if (lastObjLabelW != labelWidth) { lastObjLabelW = labelWidth; optObjLabelW = GUILayout.Width(labelWidth); }
 
         EditorGUILayout.BeginHorizontal(); GUILayout.Label("オブジェクト ON / OFF", EditorStyles.boldLabel); GUILayout.FlexibleSpace();
-        if (GUILayout.Button(jumpUpIconContent, optW20, optH18)) leftScrollPos.y = 0f;
+        if (GUILayout.Button(jumpUpIconContent, optW20, optH18)) rightScrollPos.y = 0f;
         EditorGUILayout.EndHorizontal();
 
         if (cachedActiveObjects == null || cachedActiveObjects.Count != activeObjectValues.Count)

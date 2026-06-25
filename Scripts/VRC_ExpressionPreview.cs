@@ -468,10 +468,9 @@ public class VRC_ExpressionPreview : EditorWindow
 
         if (Event.current.type == EventType.Repaint)
         {
-            // つかみ判定の判定は、メインエディタのスライダー操作のみを正確に見る
-            bool isDraggingNow = editor.IsDraggingSlider();
-
-            if (previewDummy == null || (isDirty && !isDraggingNow))
+            // 【軽量化】ドラッグ中の「更新ストップ」の判定を削除し、常に即時更新する
+            // メイン画面との干渉が解消されたため、ここで描画を一時停止する必要がなくなりました。
+            if (previewDummy == null || isDirty)
             {
                 // 【二度手間の完全解消】比較ONの時は、現在の顔のシミュレートをサボって、ダイレクトに過去顔を流し込む
                 if (isComparing)
@@ -574,7 +573,7 @@ public class VRC_ExpressionPreview : EditorWindow
             UpdateTestBaseClipCache(editor.testBaseClip, editor);
         }
 
-        // 全ループを廃止し、前回触ったキーだけを高速ピンポイントリセット
+        // 【軽量化】全ループを廃止し、前回触ったキーだけを高速ピンポイントリセット
         ResetModifiedBlendShapes();
 
         int pairCount = cachedMeshPairs.Count;
@@ -941,7 +940,7 @@ public class VRC_ExpressionPreview : EditorWindow
 
         GUILayout.Label(currentPath, EditorStyles.helpBox, optExpandTrue);
 
-        // ★【新機能】Projectウィンドウで保存先フォルダをピン留め(Ping)してフォーカスする検索ボタン
+        // Projectウィンドウで保存先フォルダをピン留め(Ping)してフォーカスする検索ボタン
         GUIContent searchIcon = EditorGUIUtility.IconContent("d_Search Icon");
         searchIcon.tooltip = "この保存先フォルダの位置をProjectウィンドウで表示します";
         if (GUILayout.Button(searchIcon, GUILayout.Width(28), GUILayout.Height(18)))
