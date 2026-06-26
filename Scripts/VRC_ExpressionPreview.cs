@@ -582,16 +582,30 @@ public class VRC_ExpressionPreview : EditorWindow
             string path = pair.relativePath;
             if (dummySmr == null || dummySmr.sharedMesh == null) continue;
 
+            // 1. アバター本来の顔（ベース形状）を適用
             if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict))
                 foreach (var kvp in baseDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(dummySmr, index, kvp.Value);
 
+            // 2. 干渉テスト用のアニメを適用
             if (editor.testBaseClip != null && testBaseClipCache.TryGetValue(path, out var baseAnimDict))
                 foreach (var kvp in baseAnimDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(dummySmr, index, kvp.Value);
 
-            if (editor.clipExpressionValues.TryGetValue(path, out var clipDict))
-                foreach (var kvp in clipDict) if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(dummySmr, index, kvp.Value);
+            // 3. 【3層構造：掲示板から直送】
+            // 棚（warehouse）のパッケージ内にある 掲示板（currentValue）を直接人形に代入する
+            if (editor.warehouse.TryGetValue(path, out var tracks))
+            {
+                foreach (var track in tracks)
+                {
+                    // もし、人形側にそのシェイプキーがあれば、数値を直接代入
+                    if (pair.shapeIndexMap.TryGetValue(track.label, out int index))
+                    {
+                        SetDummyWeight(dummySmr, index, track.currentValue);
+                    }
+                }
+            }
         }
 
+        // 4. 【オリジナルの機能維持】テスト用シェイプキーの処理（ここもそのまま残します）
         if (editor.availableSmrs != null && editor.availableSmrs.Count > editor.selectedSmrIndex)
         {
             SkinnedMeshRenderer targetSmr = editor.availableSmrs[editor.selectedSmrIndex];
@@ -605,9 +619,9 @@ public class VRC_ExpressionPreview : EditorWindow
 
             if (found && activePair.dummySmr != null)
             {
-                foreach (var kvp in editor.currentExpressionValues)
-                    if (activePair.shapeIndexMap.TryGetValue(kvp.Key, out int index)) SetDummyWeight(activePair.dummySmr, index, kvp.Value);
+                // ※【整理】currentExpressionValues による2重の上書き処理は完全に不要になったため削除しました。
 
+                // テスト用のスライダー値だけを上書き反映
                 if (editor.testShapeKeyIndex >= 0 && editor.testShapeKeyIndex < activePair.originalSmr.sharedMesh.blendShapeCount)
                 {
                     string testShapeName = activePair.originalSmr.sharedMesh.GetBlendShapeName(editor.testShapeKeyIndex);
@@ -798,14 +812,18 @@ public class VRC_ExpressionPreview : EditorWindow
             string path = pair.relativePath;
             if (dummySmr == null || dummySmr.sharedMesh == null) continue;
 
-            if (editor.clipExpressionValues.TryGetValue(path, out var clipDict))
+            // ★【3層構造へ接続】古い辞書の代わりに、棚のパッケージ（warehouse）から動いている項目を特定する
+            if (editor.warehouse.TryGetValue(path, out var tracks))
             {
-                foreach (var kvp in clipDict)
+                foreach (var track in tracks)
                 {
-                    if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index))
+                    if (pair.shapeIndexMap.TryGetValue(track.label, out int index))
                     {
                         float originalValue = 0f;
-                        if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict)) baseDict.TryGetValue(kvp.Key, out originalValue);
+                        // アバター本来のデフォルトの数値を調べて、それを代入する（消音する）
+                        if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict))
+                            baseDict.TryGetValue(track.label, out originalValue);
+
                         SetDummyWeight(dummySmr, index, originalValue);
                     }
                 }

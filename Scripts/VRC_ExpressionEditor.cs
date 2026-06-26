@@ -5,6 +5,17 @@ using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 
+// 【統合パッケージ】これ一つに今の数値（掲示板）とカーブ（倉庫）をまとめる
+public class ExpressionTrack
+{
+    public string label;          // 名前（例: Smile）
+    public string path;           // 住所
+    public System.Type type;      // 種類（メッシュか物体か）
+    public string propertyName;   // プロパティ名
+    public float currentValue;    // 【掲示板】プレビューが実際に見る数値
+    public AnimationCurve curve;  // 【倉庫】アニメーションの全データ
+}
+
 public class VRC_ExpressionEditor : EditorWindow
 {
     public static VRC_ExpressionEditor Instance { get; private set; }
@@ -22,6 +33,10 @@ public class VRC_ExpressionEditor : EditorWindow
     public Dictionary<SkinnedMeshRenderer, string> smrPathCache = new Dictionary<SkinnedMeshRenderer, string>();
 
     public List<AnimationClip> availableClips = new List<AnimationClip>();
+    public Dictionary<string, List<ExpressionTrack>> warehouse = new Dictionary<string, List<ExpressionTrack>>();
+
+    // 【エディタ全体の共通情報】今いじっている時間（秒）。デフォルトは0秒（0F）
+    public float currentTime = 0f;
 
     // 【新機能】クリップがどのレイヤーのどのステートにあるかを記録する辞書
     public Dictionary<AnimationClip, List<string>> clipLocationCache = new Dictionary<AnimationClip, List<string>>();
@@ -249,10 +264,13 @@ public class VRC_ExpressionEditor : EditorWindow
         AnimationClip clip = availableClips[selectedClipIndex];
         int group = Undo.GetCurrentGroup();
         Undo.SetCurrentGroupName("表情スライダー調整");
+
         foreach (string shapeName in dirtyShapeKeys) CommitShapeKeyValue(clip, shapeName, currentExpressionValues[shapeName]);
+
         dirtyShapeKeys.Clear();
         Undo.CollapseUndoOperations(group);
-        RefreshExpressionCache();
+
+        // プレビューはすでに最新になっているので、ここでの更新命令は完全に削除します
     }
 
     private void LoadSettings()
@@ -530,7 +548,13 @@ public class VRC_ExpressionEditor : EditorWindow
         {
             EditorGUI.BeginChangeCheck();
             selectedClipIndex = EditorGUILayout.Popup(selectedClipIndex, clipNamesCache, optWMin100, optWMax200);
-            if (EditorGUI.EndChangeCheck()) { if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues); UpdateCacheArrays(); RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview(); }
+            if (EditorGUI.EndChangeCheck()) { 
+                if (VRC_ExpressionPreview.Instance != null) VRC_ExpressionPreview.Instance.ResetPreviousAnimBlendShapes(clipExpressionValues);
+                UpdateCacheArrays();
+                RefreshExpressionCache();
+                ApplySorting();
+                ForceRepaintPreview(true);
+            }
         }
         else EditorGUILayout.LabelField("なし");
 
@@ -753,20 +777,59 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void UpdateMemoryValueOnly(string shapeName, float value, bool isMirrorCall = false)
     {
-        currentExpressionValues[shapeName] = value; dirtyShapeKeys.Add(shapeName); ForceRepaintPreview();
+        // 1. UI表示用のメモを更新
+        currentExpressionValues[shapeName] = value;
+
+        // 2. 「後で保存してねリスト」に登録
+        dirtyShapeKeys.Add(shapeName);
+
+        // 3. 【3層構造：掲示板の更新】
+        string currentPath = (availableSmrs != null && availableSmrs.Count > selectedSmrIndex)
+            ? GetRelativePath(availableSmrs[selectedSmrIndex].gameObject) : "";
+
+        if (warehouse.ContainsKey(currentPath))
+        {
+            var tracks = warehouse[currentPath];
+            var targetTrack = tracks.Find(t => t.label == shapeName);
+            if (targetTrack != null)
+            {
+                targetTrack.currentValue = value; // 掲示板を更新
+            }
+        }
+
+        // ★【ここが抜けていました！配線の復元】
+        // プレビューアバターの「動かしたシェイプキーだけ」を狙い撃ちで直接書き換える
         if (VRC_ExpressionPreview.Instance != null && availableSmrs != null && availableSmrs.Count > selectedSmrIndex)
-            if (smrPathCache.TryGetValue(availableSmrs[selectedSmrIndex], out string path)) VRC_ExpressionPreview.Instance.UpdateSingleBlendShapeImmediate(path, shapeName, value);
+        {
+            if (smrPathCache.TryGetValue(availableSmrs[selectedSmrIndex], out string path))
+            {
+                // プレビュー側にある「狙い撃ち更新関数」に直接値を送る
+                VRC_ExpressionPreview.Instance.UpdateSingleBlendShapeImmediate(path, shapeName, value);
+            }
+        }
+
+        // 4. プレビュー画面の塗り直しだけを命令する（全体リセットは走らないので爆速）
+        ForceRepaintPreview(false);
+
+        // 5. 【機能維持】コピペモードの処理
         if (isCopyPasteMode && copyTargetShapes.Contains(shapeName)) clipboardValues[shapeName] = value;
-        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner)) UpdateMemoryValueOnly(partner, value, true);
+
+        // 6. 【機能維持】左右対称（ミラー）モードの処理
+        if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner))
+        {
+            UpdateMemoryValueOnly(partner, value, true);
+        }
     }
 
-    private void CommitShapeKeyValue(AnimationClip clip, string shapeName, float value, bool isMirrorCall = false)
+    // ★カッコの末尾に customTime = -1f を追加
+    private void CommitShapeKeyValue(AnimationClip clip, string shapeName, float value, bool isMirrorCall = false, float customTime = -1f)
     {
         int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("表情シェイプ変更");
         SkinnedMeshRenderer mainSmr = availableSmrs[selectedSmrIndex];
         string mainPath = smrPathCache.ContainsKey(mainSmr) ? smrPathCache[mainSmr] : GetRelativePath(mainSmr.gameObject);
 
-        RegisterShapeKeyConstant(clip, EditorCurveBinding.FloatCurve(mainPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), value);
+        // ★最後の引数に customTime を追加してバトンタッチする
+        RegisterShapeKeyConstant(clip, EditorCurveBinding.FloatCurve(mainPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), value, customTime);
 
         if (autoLinkShapeKeys)
         {
@@ -888,9 +951,15 @@ public class VRC_ExpressionEditor : EditorWindow
         GUILayout.BeginVertical(GUI.skin.box); GUILayout.Label("表情ユーティリティ / 一括処理", EditorStyles.boldLabel);
         GUILayout.BeginVertical(GUI.skin.box); GUILayout.Label("参照アニメの項目をコピー", EditorStyles.miniBoldLabel);
         referenceClip = (AnimationClip)EditorGUILayout.ObjectField("参照用", referenceClip, typeof(AnimationClip), false);
-        if (GUILayout.Button("参照先の全項目を「0」で追加")) ProcessFromReferenceClip();
+        // ★ホバー時のツールチップ説明を追加
+        if (GUILayout.Button(new GUIContent("参照先の全項目を「0」で追加", "参照用アニメの全項目を、0Fの表情に対して「0」の値で追加します。"))) ProcessFromReferenceClip();
         EditorGUILayout.Space();
-        GUI.backgroundColor = new Color(0.8f, 1f, 0.8f); if (GUILayout.Button("全ての未登録キーを「0」で埋める")) ProcessShapeKeys(); GUI.backgroundColor = Color.white;
+        GUI.backgroundColor = new Color(0.8f, 1f, 0.8f);
+
+        // ★ホバー時のツールチップ説明を追加
+        if (GUILayout.Button(new GUIContent("全ての未登録キーを「0」で埋める", "このメッシュのすべての未登録シェイプキーを、0Fの表情に対して「0」の値で埋めます。"))) ProcessShapeKeys();
+
+        GUI.backgroundColor = Color.white;
         GUILayout.EndVertical();
         EditorGUILayout.Space();
         GUI.backgroundColor = new Color(1f, 0.7f, 0.7f);
@@ -1044,42 +1113,64 @@ public class VRC_ExpressionEditor : EditorWindow
 
     public void RefreshExpressionCache()
     {
-        currentExpressionValues.Clear(); clipExpressionValues.Clear(); registeredShapeKeys.Clear(); dirtyShapeKeys.Clear(); activeObjectValues.Clear();
-        if (availableClips.Count <= selectedClipIndex || availableSmrs == null || availableSmrs.Count <= selectedSmrIndex) return;
+        // 1. まずは「棚」と「既存の掲示板」を綺麗に空にする
+        warehouse.Clear();
+        currentExpressionValues.Clear();
+        clipExpressionValues.Clear();
+        registeredShapeKeys.Clear();
+        dirtyShapeKeys.Clear();
+        activeObjectValues.Clear();
+
+        // 2. アニメーションが選択されていない場合は何もしない
+        if (availableClips.Count <= selectedClipIndex) return;
 
         AnimationClip clip = availableClips[selectedClipIndex];
-        SkinnedMeshRenderer targetSmr = availableSmrs[selectedSmrIndex];
-        string targetPath = smrPathCache.ContainsKey(targetSmr) ? smrPathCache[targetSmr] : GetRelativePath(targetSmr.gameObject);
-        GameObject dummy = VRC_ExpressionPreview.Instance?.GetPreviewDummy();
-        if (dummy != null) clip.SampleAnimation(dummy, 0f);
 
-        foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+        // 3. 本物のアニメーションファイル（.anim）の中身をスキャンして「全住所」を取得
+        var bindings = AnimationUtility.GetCurveBindings(clip);
+
+        // 4. 今エディタで選んでいるメッシュの「住所（パス）」を取得しておく
+        string currentSmrPath = (availableSmrs.Count > selectedSmrIndex)
+            ? GetRelativePath(availableSmrs[selectedSmrIndex].gameObject) : "";
+
+        foreach (var b in bindings)
         {
-            if (binding.type == typeof(SkinnedMeshRenderer) && binding.propertyName.StartsWith("blendShape."))
-            {
-                string name = binding.propertyName.Replace("blendShape.", ""); float val = 0f; bool fetched = false;
-                AnimationCurve curve = EditorCurveBinding.FloatCurve(binding.path, binding.type, binding.propertyName) == null ? null : AnimationUtility.GetEditorCurve(clip, binding);
-                if (curve != null && curve.keys.Length > 0) { val = curve.keys[0].value; fetched = true; }
+            // 5. 棚にこの住所（パス）のコーナーがなければ作る
+            if (!warehouse.ContainsKey(b.path)) warehouse[b.path] = new List<ExpressionTrack>();
 
-                if (!fetched && dummy != null)
-                {
-                    Transform t = string.IsNullOrEmpty(binding.path) ? dummy.transform : dummy.transform.Find(binding.path);
-                    if (t != null && t.GetComponent<SkinnedMeshRenderer>() is SkinnedMeshRenderer smr && smr.sharedMesh != null)
-                    {
-                        int idx = smr.sharedMesh.GetBlendShapeIndex(name); if (idx != -1) { val = smr.GetBlendShapeWeight(idx); fetched = true; }
-                    }
-                }
-                if (!clipExpressionValues.ContainsKey(binding.path)) clipExpressionValues[binding.path] = new Dictionary<string, float>();
-                clipExpressionValues[binding.path][name] = val;
-                if (binding.path == targetPath) { currentExpressionValues[name] = val; registeredShapeKeys.Add(name); }
-            }
-            else if (binding.type == typeof(GameObject) && binding.propertyName == "m_IsActive")
+            // 6. パッケージを作成し、ファイルから取り出した「倉庫（カーブ）」や住所を詰め込む
+            var curve = AnimationUtility.GetEditorCurve(clip, b);
+            var track = new ExpressionTrack
             {
-                AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
-                if (curve != null && curve.keys.Length > 0) activeObjectValues[binding.path] = curve.keys[0].value > 0.5f;
+                path = b.path,
+                type = b.type,
+                propertyName = b.propertyName,
+                label = b.propertyName.Replace("blendShape.", "").Replace("m_IsActive", "有効/無効"),
+                curve = curve,
+                currentValue = curve.Evaluate(currentTime)
+            };
+
+            // 7. 棚（warehouse）にパッケージを並べる
+            warehouse[b.path].Add(track);
+
+            // 8. 【互換性のための処理】以前のコードが使っていた掲示板（辞書）もついでに更新しておく
+            if (!clipExpressionValues.ContainsKey(b.path)) clipExpressionValues[b.path] = new Dictionary<string, float>();
+            clipExpressionValues[b.path][track.label] = track.currentValue;
+
+            // 9. もし今のパッケージが、今いじっているメッシュのものなら、スライダー用データとして登録
+            if (b.path == currentSmrPath && b.type == typeof(SkinnedMeshRenderer))
+            {
+                currentExpressionValues[track.label] = track.currentValue;
+                registeredShapeKeys.Add(track.label);
+            }
+            else if (b.type == typeof(GameObject) && b.propertyName == "m_IsActive")
+            {
+                activeObjectValues[b.path] = track.currentValue > 0.5f;
             }
         }
-        RecalculateObjNameWidth();
+
+        // 10. スライダーの並び順を整理する（元の関数の末尾にあった処理）
+        ApplySorting();
     }
 
     private void RecalculateObjNameWidth()
@@ -1259,15 +1350,59 @@ public class VRC_ExpressionEditor : EditorWindow
         AssetDatabase.Refresh();
     }
 
-    private void RegisterShapeKeyConstant(AnimationClip clip, EditorCurveBinding binding, float value)
+    // ★カッコの末尾に customTime = -1f を追加
+    private void RegisterShapeKeyConstant(AnimationClip clip, EditorCurveBinding binding, float value, float customTime = -1f)
     {
         Undo.RecordObject(clip, "シェイプキー変更");
-        AnimationCurve curve = new AnimationCurve(new Keyframe(0f, value));
+        string shapeName = binding.propertyName.Replace("blendShape.", "");
+        string path = binding.path;
+
+        // ★指定時間（customTime）が0以上ならそれを使い、そうでなければエディタの現在の時間（currentTime）を使う
+        float time = (customTime >= 0f) ? customTime : currentTime;
+
+        // 1. 【倉庫の更新】自前の棚（warehouse）から既存のカーブを取り出す
+        AnimationCurve curve = null;
+        if (warehouse.TryGetValue(path, out var tracks))
+        {
+            var track = tracks.Find(t => t.label == shapeName);
+            if (track != null)
+            {
+                curve = track.curve;
+                track.currentValue = value; // 掲示板（currentValue）も最新にしておく
+            }
+        }
+
+        // もし棚にデータがなければ（新規登録時など）、新しいカーブを用意する
+        if (curve == null)
+        {
+            curve = new AnimationCurve();
+        }
+
+        // 2. 【未来対応】0f だった部分を time（変数）に変更
+        bool found = false;
+        for (int i = 0; i < curve.keys.Length; i++)
+        {
+            if (Mathf.Approximately(curve.keys[i].time, time)) // time（変数）にする
+            {
+                curve.MoveKey(i, new Keyframe(time, value)); // time（変数）にする
+                found = true;
+                break;
+            }
+        }
+        if (!found) curve.AddKey(time, value); // time（変数）にする
+
+        // 3. 【ファイルの更新】安全に更新されたカーブを保存
         AnimationUtility.SetEditorCurve(clip, binding, curve);
-        string shapeName = binding.propertyName.Replace("blendShape.", ""); string path = binding.path;
+
+        // 4. 【オリジナルの機能維持】既存の掲示板（辞書）も同期しておく
         if (!clipExpressionValues.ContainsKey(path)) clipExpressionValues[path] = new Dictionary<string, float>();
         clipExpressionValues[path][shapeName] = value;
-        if (availableSmrs != null && availableSmrs.Count > selectedSmrIndex && path == GetRelativePath(availableSmrs[selectedSmrIndex].gameObject)) { currentExpressionValues[shapeName] = value; registeredShapeKeys.Add(shapeName); }
+
+        if (availableSmrs != null && availableSmrs.Count > selectedSmrIndex && path == GetRelativePath(availableSmrs[selectedSmrIndex].gameObject))
+        {
+            currentExpressionValues[shapeName] = value;
+            registeredShapeKeys.Add(shapeName);
+        }
     }
 
     private void ProcessShapeKeys()
@@ -1279,7 +1414,9 @@ public class VRC_ExpressionEditor : EditorWindow
         for (int i = 0; i < smr.sharedMesh.blendShapeCount; i++)
         {
             string name = smr.sharedMesh.GetBlendShapeName(i);
-            if (AnimationUtility.GetEditorCurve(clip, EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + name)) == null) CommitShapeKeyValue(clip, name, 0f);
+            if (AnimationUtility.GetEditorCurve(clip, EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + name)) == null)
+                // 末尾に「, false, 0f」を追加して、強制的に0秒目（0F）に書き込ませます
+                CommitShapeKeyValue(clip, name, 0f, false, 0f);
         }
         Undo.CollapseUndoOperations(group); AssetDatabase.SaveAssets(); RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview();
     }
@@ -1295,7 +1432,9 @@ public class VRC_ExpressionEditor : EditorWindow
             if (binding.propertyName.StartsWith("blendShape."))
             {
                 string name = binding.propertyName.Replace("blendShape.", "");
-                if (AnimationUtility.GetEditorCurve(targetClip, EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + name)) == null) CommitShapeKeyValue(targetClip, name, 0f);
+                if (AnimationUtility.GetEditorCurve(targetClip, EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + name)) == null)
+                    // 同様に、末尾に「, false, 0f」を追加
+                    CommitShapeKeyValue(targetClip, name, 0f, false, 0f);
             }
         }
         Undo.CollapseUndoOperations(group); AssetDatabase.SaveAssets(); RefreshExpressionCache(); ApplySorting(); ForceRepaintPreview();
@@ -1325,7 +1464,20 @@ public class VRC_ExpressionEditor : EditorWindow
     }
 
     public string GetRelativePath(GameObject obj) => obj == null || rootObject == null ? "" : GetRelativePath(rootObject.transform, obj.transform);
-    public void ForceRepaintPreview() { if (VRC_ExpressionPreview.Instance != null) { VRC_ExpressionPreview.Instance.MarkPreviewDirty(); VRC_ExpressionPreview.Instance.Repaint(); } }
+
+    // fullRebuild が true の時だけ顔をすっぴんに戻し、普段（false）は画面の塗り直しだけにする
+    public void ForceRepaintPreview(bool fullRebuild = true)
+    {
+        if (VRC_ExpressionPreview.Instance != null)
+        {
+            if (fullRebuild)
+            {
+                VRC_ExpressionPreview.Instance.MarkPreviewDirty(); // すっぴんに戻すフラグを立てる
+            }
+            VRC_ExpressionPreview.Instance.Repaint();
+        }
+    }
+
     private bool CheckIsMultiFrame(AnimationClip clip) { if (clip == null) return false; foreach (var binding in AnimationUtility.GetCurveBindings(clip)) { var curve = AssetDatabase.GetAssetPath(clip) == "" ? null : AnimationUtility.GetEditorCurve(clip, binding); if (curve != null && curve.keys.Length > 1 && curve.keys.Any(k => k.time > 0.01f)) return true; } return false; }
 }
 
