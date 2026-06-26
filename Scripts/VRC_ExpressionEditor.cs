@@ -121,6 +121,9 @@ public class VRC_ExpressionEditor : EditorWindow
     private GUIContent gearIconContent;
     private GUIStyle centerLockStyle;
 
+    // ★追加：並び替えの予約フラグ
+    private bool needsSorting = false;
+
     [System.NonSerialized] public List<string> detailFilterWords = new List<string>();
     [System.NonSerialized] public List<bool> detailFilterActives = new List<bool>();
     [System.NonSerialized] public bool isFilterWindowOpen = false;
@@ -1175,6 +1178,8 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void RecalculateObjNameWidth()
     {
+        // ★追加：エラー回避
+        if (EditorStyles.label == null) return;
         cachedMaxObjNameWidth = 75f; GUIStyle labelStyle = new GUIStyle(EditorStyles.label); cachedActiveObjects.Clear();
         foreach (var kvp in activeObjectValues)
         {
@@ -1229,6 +1234,8 @@ public class VRC_ExpressionEditor : EditorWindow
 
     public void ApplySorting()
     {
+        // ★追加：Unityのデザイン準備ができていない場合は、一旦処理を飛ばす（エラー回避）
+        if (EditorStyles.label == null) return;
         if (availableSmrs == null || availableSmrs.Count <= selectedSmrIndex || availableClips.Count <= selectedClipIndex) return;
         SkinnedMeshRenderer smr = availableSmrs[selectedSmrIndex];
         var list = new List<string>(); for (int i = 0; i < smr.sharedMesh.blendShapeCount; i++) list.Add(smr.sharedMesh.GetBlendShapeName(i));
@@ -1477,7 +1484,7 @@ public class VRC_ExpressionEditor : EditorWindow
             VRC_ExpressionPreview.Instance.Repaint();
         }
     }
-
+    public int GetDirtyCount() => dirtyShapeKeys.Count;
     private bool CheckIsMultiFrame(AnimationClip clip) { if (clip == null) return false; foreach (var binding in AnimationUtility.GetCurveBindings(clip)) { var curve = AssetDatabase.GetAssetPath(clip) == "" ? null : AnimationUtility.GetEditorCurve(clip, binding); if (curve != null && curve.keys.Length > 1 && curve.keys.Any(k => k.time > 0.01f)) return true; } return false; }
 }
 

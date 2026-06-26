@@ -1105,4 +1105,19 @@ public class VRC_ExpressionPreview : EditorWindow
             previewUtility.camera.clearFlags = CameraClearFlags.SolidColor;
         }
     }
+    // --- タイムライン窓からアクセスするための窓口 ---
+    public bool GetIsComparing() => isComparing;
+    public bool GetIsMuted() => isMuted;
+
+    public void SetIsComparing(bool value)
+    {
+        isComparing = value;
+        MarkPreviewDirty(); // 状態が変わったので再描画を予約
+    }
+
+    public void SetIsMuted(bool value)
+    {
+        isMuted = value;
+        MarkPreviewDirty(); // 状態が変わったので再描画を予約
+    }
 }
