@@ -743,7 +743,15 @@ public class VRC_ExpressionPreview : EditorWindow
 
     private void DrawSnapshotPanel(VRC_ExpressionEditor editor)
     {
-        GUILayout.BeginVertical(GUI.skin.box);
+        // ★追加1：タイムラインが再生中かどうかを確認する
+        bool isPlaying = VRC_ExpressionTimeline.Instance != null && VRC_ExpressionTimeline.Instance.IsPlaying();
+
+        // ★追加2：再生中なら「無効化（グレーアウト）」を開始
+        EditorGUI.BeginDisabledGroup(isPlaying);
+
+        // --- ここから既存のUI描画 ---
+        // Vertical(GUI.skin.box) の戻り値を panelRect として受け取るように変更します
+        Rect panelRect = EditorGUILayout.BeginVertical(GUI.skin.box);
         GUILayout.Label("表情スナップショット (一時比較)", EditorStyles.boldLabel);
 
         EditorGUILayout.BeginHorizontal();
@@ -756,17 +764,9 @@ public class VRC_ExpressionPreview : EditorWindow
         isComparing = GUILayout.Toggle(isComparing, "👁️ 比較 (ON/OFF)", GUI.skin.button, optH20);
         if (EditorGUI.EndChangeCheck())
         {
-            // 【即時反映の核】トグルが切り替わった瞬間(MouseUp)に直接その場で表情を上書き更新
             isDirty = true;
-            if (isComparing)
-            {
-                EnsureDummyExists(editor);
-                ApplySnapshotDirectly();
-            }
-            else
-            {
-                SetupAndPoseDummy(editor);
-            }
+            if (isComparing) { EnsureDummyExists(editor); ApplySnapshotDirectly(); }
+            else { SetupAndPoseDummy(editor); }
             Repaint();
         }
         GUI.backgroundColor = prevBg;
@@ -777,17 +777,9 @@ public class VRC_ExpressionPreview : EditorWindow
         isMuted = GUILayout.Toggle(isMuted, "🔇 ミュート", GUI.skin.button, optH20);
         if (EditorGUI.EndChangeCheck())
         {
-            // 【即時反映】
             isDirty = true;
-            if (isMuted)
-            {
-                EnsureDummyExists(editor);
-                ApplyMuteExpressionDirectly(editor);
-            }
-            else
-            {
-                SetupAndPoseDummy(editor);
-            }
+            if (isMuted) { EnsureDummyExists(editor); ApplyMuteExpressionDirectly(editor); }
+            else { SetupAndPoseDummy(editor); }
             Repaint();
         }
         GUI.backgroundColor = prevBgMute;
@@ -797,7 +789,10 @@ public class VRC_ExpressionPreview : EditorWindow
 
         EditorGUILayout.EndHorizontal();
         GUILayout.Label(snapshotClipValues.Count > 0 ? "※一時保存中..." : "※一時保存データはありません", EditorStyles.miniLabel);
-        GUILayout.EndVertical();
+        EditorGUILayout.EndVertical();
+
+        // ★追加3：無効化を終了
+        EditorGUI.EndDisabledGroup();
     }
 
     private void ApplyMuteExpressionDirectly(VRC_ExpressionEditor editor)

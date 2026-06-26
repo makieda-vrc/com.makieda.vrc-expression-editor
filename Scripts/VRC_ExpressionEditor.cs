@@ -93,7 +93,6 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private float cachedMaxShapeNameWidth = 75f;
     private float cachedMaxObjNameWidth = 75f;
-    private bool isMultiFrameCache = false;
     private string[] clipNamesCache = new string[0];
     private string[] smrNamesCache = new string[0];
     public string[] testShapeNamesCache = new string[0];
@@ -107,7 +106,6 @@ public class VRC_ExpressionEditor : EditorWindow
     private GUIStyle cachedPlaceholderStyle;
     private GUIContent cachedFavOnContent;
     private GUIContent cachedFavOffContent;
-    private GUIContent warnIconContent;
     private GUIContent trashIconContent;
     private GUIContent gridIconContent;
     private GUIContent createIconContent;
@@ -120,7 +118,7 @@ public class VRC_ExpressionEditor : EditorWindow
     private GUIContent cachedSortTooltipContent;
     private GUIContent gearIconContent;
     private GUIStyle centerLockStyle;
-
+    private bool wasPlaying;
     // ★追加：並び替えの予約フラグ
     private bool needsSorting = false;
 
@@ -379,7 +377,6 @@ public class VRC_ExpressionEditor : EditorWindow
             cachedSortTooltipContent = new GUIContent("", "シェイプキーの表示順を変更します");
             cachedFavOnContent = new GUIContent("★", "ピン留め解除");
             cachedFavOffContent = new GUIContent("☆", "ピン留め");
-            warnIconContent = EditorGUIUtility.IconContent("console.warnIcon"); warnIconContent.tooltip = "警告: 複数フレームを持っています。\nスライダーを動かすと1F目に上書きされます！";
             trashIconContent = EditorGUIUtility.IconContent("TreeEditor.Trash"); trashIconContent.tooltip = "このアニメを編集リストから除外する";
             gridIconContent = EditorGUIUtility.IconContent("d_Mesh Icon"); gridIconContent.tooltip = "表情サムネイル一覧を開く";
             createIconContent = EditorGUIUtility.IconContent("Toolbar Plus"); createIconContent.tooltip = "新規表情アニメを作成";
@@ -501,6 +498,16 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void DrawControlPanel()
     {
+        // ★追加：再生中かどうかを判定
+        bool isPlaying = VRC_ExpressionTimeline.Instance != null && VRC_ExpressionTimeline.Instance.IsPlaying();
+
+        // ★追加：再生状態が変わった瞬間に、自分（エディタ窓）を強制的に再描画させる
+        // これにより、クリックしなくても即座にグレーアウトされるようになります
+        if (isPlaying != wasPlaying)
+        {
+            wasPlaying = isPlaying;
+            Repaint();
+        }
         float rowWidth = position.width - 18f; if (isFilterWindowOpen) rowWidth -= (filterPanelWidth + 10f);
 
         Rect row1Rect = EditorGUILayout.GetControlRect(optH18);
@@ -560,9 +567,6 @@ public class VRC_ExpressionEditor : EditorWindow
             }
         }
         else EditorGUILayout.LabelField("なし");
-
-        if (isMultiFrameCache) GUILayout.Label(warnIconContent, optW18, optH18);
-
         if (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0)
         {
             AnimationClip currentClip = availableClips[selectedClipIndex];
@@ -606,6 +610,9 @@ public class VRC_ExpressionEditor : EditorWindow
 
         EditorGUI.BeginChangeCheck(); searchFilter = EditorGUI.TextField(searchFieldRect, searchFilter);
         if (EditorGUI.EndChangeCheck()) ApplySorting();
+
+        // ★追加：ここから下の「設定・編集UI」をすべてロック（無効化）する
+        EditorGUI.BeginDisabledGroup(isPlaying);
 
         if (string.IsNullOrEmpty(searchFilter)) GUI.Label(new Rect(searchFieldRect.x + 3f, searchFieldRect.y + 1f, searchFieldRect.width, 18), "絞り込み...", cachedPlaceholderStyle);
 
@@ -660,6 +667,8 @@ public class VRC_ExpressionEditor : EditorWindow
 
         GUILayout.Box("", optExpandTrue, optH1);
         DrawActionButtons();
+        // ★追加：ここでロックを解除
+        EditorGUI.EndDisabledGroup();
     }
 
     private void BuildMirrorMap()
@@ -983,9 +992,6 @@ public class VRC_ExpressionEditor : EditorWindow
         smrNamesCache = availableSmrs.Select(s => s.name).ToArray();
         testClipNamesCache = new string[availableClips.Count + 1]; testClipNamesCache[0] = "なし (直接指定)";
         for (int i = 0; i < availableClips.Count; i++) testClipNamesCache[i + 1] = availableClips[i].name;
-
-        isMultiFrameCache = (availableClips.Count > selectedClipIndex && selectedClipIndex >= 0) ? CheckIsMultiFrame(availableClips[selectedClipIndex]) : false;
-
         if (availableSmrs != null && availableSmrs.Count > selectedSmrIndex)
         {
             var smr = availableSmrs[selectedSmrIndex];
@@ -1484,8 +1490,6 @@ public class VRC_ExpressionEditor : EditorWindow
             VRC_ExpressionPreview.Instance.Repaint();
         }
     }
-    public int GetDirtyCount() => dirtyShapeKeys.Count;
-    private bool CheckIsMultiFrame(AnimationClip clip) { if (clip == null) return false; foreach (var binding in AnimationUtility.GetCurveBindings(clip)) { var curve = AssetDatabase.GetAssetPath(clip) == "" ? null : AnimationUtility.GetEditorCurve(clip, binding); if (curve != null && curve.keys.Length > 1 && curve.keys.Any(k => k.time > 0.01f)) return true; } return false; }
 }
 
 public class ExpressionEditorLayerPopup : PopupWindowContent
