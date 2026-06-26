@@ -135,8 +135,17 @@ public class VRC_ExpressionPreview : EditorWindow
         var editor = VRC_ExpressionEditor.Instance;
         if (editor == null) { this.Close(); return; }
 
+        // ★【改善】表情の更新（isDirty）は、0.1秒のお休みを無視して、最優先で「即座に」実行する！
+        if (isDirty)
+        {
+            SetupAndPoseDummy(editor);
+            Repaint();
+            isDirty = false; // フラグを下ろす
+        }
+
+        // --- ここから下は、ライト等の重い処理用（0.1秒のお休みを適用） ---
         double timeSinceStartup = EditorApplication.timeSinceStartup;
-        if (timeSinceStartup - lastLightCheckTime < 0.1) return;
+        if (timeSinceStartup - lastLightCheckTime < 0.1) return; // ライト用のお休み
         lastLightCheckTime = timeSinceStartup;
 
         if (editor.IsDraggingSlider()) return;
@@ -531,6 +540,8 @@ public class VRC_ExpressionPreview : EditorWindow
 
     private void EnsureDummyExists(VRC_ExpressionEditor editor)
     {
+        // ★追加：アバターがいない時は、クラッシュを防ぐために処理を中止させる
+        if (editor == null || editor.rootObject == null) return;
         if (previewDummy == null)
         {
             Animator origAnim = editor.rootObject.GetComponent<Animator>();

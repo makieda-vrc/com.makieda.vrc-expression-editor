@@ -270,7 +270,10 @@ public class VRC_ExpressionEditor : EditorWindow
 
         dirtyShapeKeys.Clear();
         Undo.CollapseUndoOperations(group);
-
+        if (VRC_ExpressionTimeline.Instance != null)
+        {
+            VRC_ExpressionTimeline.Instance.UpdateKeyframeCache(this);
+        }
         // プレビューはすでに最新になっているので、ここでの更新命令は完全に削除します
     }
 
@@ -748,15 +751,69 @@ public class VRC_ExpressionEditor : EditorWindow
             }
         }
 
+        string currentPath = (availableSmrs != null && availableSmrs.Count > selectedSmrIndex)
+            ? GetRelativePath(availableSmrs[selectedSmrIndex].gameObject) : "";
+
+        // マウスの位置を取得
+        Vector2 mousePos = Event.current.mousePosition;
+
         for (int i = 0; i < sortedShapeKeyNames.Count; i++)
         {
-            string shapeName = sortedShapeKeyNames[i]; GUIContent shapeContent = cachedShapeContents[i];
+            string shapeName = sortedShapeKeyNames[i];
+            GUIContent shapeContent = cachedShapeContents[i];
             float currentValue = currentExpressionValues.ContainsKey(shapeName) ? currentExpressionValues[shapeName] : 0f;
             bool isRegistered = registeredShapeKeys.Contains(shapeName);
-            GUIStyle currentLabelStyle = isRegistered ? cachedBoldLabelStyle : cachedNormalLabelStyle;
-            GUI.contentColor = isRegistered ? (!Mathf.Approximately(currentValue, 0f) ? new Color(0.4f, 1f, 0.4f) : Color.white) : new Color(0.8f, 0.8f, 0.8f);
 
-            EditorGUILayout.BeginHorizontal();
+            // 1. 【判定】今のフレーム（currentTime）にキーがあるか調べる
+            bool hasKeyAtCurrentTime = false;
+            if (isRegistered && warehouse.TryGetValue(currentPath, out var tracks))
+            {
+                var track = tracks.Find(t => t.label == shapeName);
+                if (track != null)
+                {
+                    foreach (var key in track.curve.keys)
+                    {
+                        if (Mathf.Approximately(key.time, currentTime))
+                        {
+                            hasKeyAtCurrentTime = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 2. 【決定】状態に合わせて「色」と「記号（マーク）」を決める
+            Color labelColor;
+            string iconMark = hasKeyAtCurrentTime ? "●" : "⦿";
+
+            if (!isRegistered)
+            {
+                labelColor = Color.gray;
+                iconMark = "○";
+            }
+            else if (hasKeyAtCurrentTime)
+            {
+                labelColor = Mathf.Approximately(currentValue, 0f) ? new Color(0.4f, 0.8f, 1f) : new Color(0.4f, 1f, 0.4f);
+            }
+            else
+            {
+                labelColor = Mathf.Approximately(currentValue, 0f) ? Color.white : new Color(1f, 0.6f, 0.2f);
+            }
+
+            GUIStyle currentLabelStyle = isRegistered ? cachedBoldLabelStyle : cachedNormalLabelStyle;
+            GUI.contentColor = labelColor;
+
+            // スライダーの行（水平グループ）の範囲を記録
+            Rect rowRect = EditorGUILayout.BeginHorizontal();
+
+            // ★追加①：【ホバーハイライト】マウスがこの行の上にあるとき、うっすらと青い背景を敷く
+            // （Repaintイベントの時だけ描画することで、スライダーのドラッグ操作の邪魔をしません）
+            if (Event.current.type == EventType.Repaint && rowRect.Contains(mousePos))
+            {
+                // Unityのプロスキンに馴染む、うっすらとした選択色（青グレー）
+                EditorGUI.DrawRect(rowRect, new Color(0.3f, 0.5f, 0.8f, 0.12f));
+            }
+
             float currentCheckboxWidth = 0f;
             if (isCopyPasteMode)
             {
@@ -770,7 +827,24 @@ public class VRC_ExpressionEditor : EditorWindow
             if (GUILayout.Button(isFav ? cachedFavOnContent : cachedFavOffContent, EditorStyles.label, optW15)) { if (isFav) favoriteShapes.Remove(shapeName); else favoriteShapes.Add(shapeName); ApplySorting(); SaveCurrentSettings(); GUIUtility.ExitGUI(); }
             GUI.contentColor = oldCol;
 
-            if (GUILayout.Button(isRegistered ? "●" : "○", cachedDotButtonStyle, optW15)) { if (isRegistered) RemoveShapeKeyValue(clip, shapeName); else CommitShapeKeyValue(clip, shapeName, 0f); ApplySorting(); ForceRepaintPreview(); }
+            // 左クリック時の挙動（このフレームのキーだけを ON / OFF）
+            if (GUILayout.Button(iconMark, cachedDotButtonStyle, optW15))
+            {
+                if (!isRegistered)
+                {
+                    CommitShapeKeyValue(clip, shapeName, 0f);
+                }
+                else if (hasKeyAtCurrentTime)
+                {
+                    RemoveKeyframeAtTime(clip, currentPath, shapeName, currentTime);
+                }
+                else
+                {
+                    CommitShapeKeyValue(clip, shapeName, currentValue);
+                }
+                ApplySorting();
+                ForceRepaintPreview();
+            }
 
             GUILayout.Label(shapeContent, currentLabelStyle, optShapeLabelW);
 
@@ -783,7 +857,21 @@ public class VRC_ExpressionEditor : EditorWindow
             EditorGUI.BeginChangeCheck(); float textValue = EditorGUILayout.FloatField(currentValue, optW40);
             if (EditorGUI.EndChangeCheck()) UpdateMemoryValueOnly(shapeName, textValue);
 
-            EditorGUILayout.EndHorizontal(); GUI.contentColor = Color.white;
+            EditorGUILayout.EndHorizontal();
+            GUI.contentColor = Color.white;
+
+            // ★追加②：【名前入り右クリックメニュー ＆ 確認ポップアップ廃止】
+            // スライダーの行を右クリックしたときに、対象の名前をメニューに表示して、即座に削除する
+            if (Event.current.type == EventType.ContextClick && rowRect.Contains(mousePos))
+            {
+                GenericMenu menu = new GenericMenu();
+                // メニュー自体に「『Smile』をアニメから削除」と表示させます
+                menu.AddItem(new GUIContent($"「{shapeName}」をアニメから削除"), false, () => {
+                    RemoveShapeKeyValue(clip, shapeName); // ポップアップを挟まず、即座に削除！
+                });
+                menu.ShowAsContext();
+                Event.current.Use();
+            }
         }
     }
 
@@ -859,7 +947,7 @@ public class VRC_ExpressionEditor : EditorWindow
         Undo.CollapseUndoOperations(group); ForceRepaintPreview();
     }
 
-    private void RemoveShapeKeyValue(AnimationClip clip, string shapeName, bool isMirrorCall = false)
+private void RemoveShapeKeyValue(AnimationClip clip, string shapeName, bool isMirrorCall = false)
     {
         int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("シェイプキー登録解除");
         SkinnedMeshRenderer mainSmr = availableSmrs[selectedSmrIndex];
@@ -867,6 +955,12 @@ public class VRC_ExpressionEditor : EditorWindow
 
         Undo.RecordObject(clip, "シェイプキー削除");
         AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve(mainPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), null);
+
+        // ★追加：メモリ上の棚（warehouse）からも完全に削除して整合性を保つ
+        if (warehouse.TryGetValue(mainPath, out var tracks))
+        {
+            tracks.RemoveAll(t => t.label == shapeName);
+        }
 
         if (clipExpressionValues.TryGetValue(mainPath, out var dict)) dict.Remove(shapeName);
         currentExpressionValues.Remove(shapeName); registeredShapeKeys.Remove(shapeName); dirtyShapeKeys.Remove(shapeName);
@@ -880,12 +974,15 @@ public class VRC_ExpressionEditor : EditorWindow
                 {
                     string path = smrPathCache.ContainsKey(smr) ? smrPathCache[smr] : GetRelativePath(smr.gameObject);
                     AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeName), null);
+                    
+                    if (warehouse.TryGetValue(path, out var lTracks)) lTracks.RemoveAll(t => t.label == shapeName);
                     if (clipExpressionValues.TryGetValue(path, out var lDict)) lDict.Remove(shapeName);
                 }
             }
         }
         if (!isMirrorCall && isMirroringEnabled && mirrorShapeMap.TryGetValue(shapeName, out string partner)) if (registeredShapeKeys.Contains(partner)) RemoveShapeKeyValue(clip, partner, true);
         Undo.CollapseUndoOperations(group);
+        RefreshExpressionCache();
     }
 
     private void DrawObjectActivePanel()
@@ -1177,9 +1274,13 @@ public class VRC_ExpressionEditor : EditorWindow
                 activeObjectValues[b.path] = track.currentValue > 0.5f;
             }
         }
-
         // 10. スライダーの並び順を整理する（元の関数の末尾にあった処理）
         ApplySorting();
+        // ★追加：もしタイムラインが開いていたら、目盛りの点（ドット）を即座に再計算させる
+        if (VRC_ExpressionTimeline.Instance != null)
+        {
+            VRC_ExpressionTimeline.Instance.UpdateKeyframeCache(this);
+        }
     }
 
     private void RecalculateObjNameWidth()
@@ -1246,6 +1347,9 @@ public class VRC_ExpressionEditor : EditorWindow
         SkinnedMeshRenderer smr = availableSmrs[selectedSmrIndex];
         var list = new List<string>(); for (int i = 0; i < smr.sharedMesh.blendShapeCount; i++) list.Add(smr.sharedMesh.GetBlendShapeName(i));
 
+        // 今選んでいるメッシュの住所（パス）
+        string currentPath = GetRelativePath(smr.gameObject);
+
         var activeFilters = new List<string>();
         for (int i = 0; i < detailFilterWords.Count; i++)
         {
@@ -1279,15 +1383,41 @@ public class VRC_ExpressionEditor : EditorWindow
                 return true;
             })
             .OrderBy(name => {
+                // 1. 最優先：お気に入り（★）に入っているものを上に集める
                 return favoriteShapes.Contains(name) ? 0 : 1;
             }).ThenBy(name => {
                 if (currentSortMode == SortMode.Default) return list.IndexOf(name);
 
                 if (currentSortMode == SortMode.ActiveFirst)
                 {
+                    // 登録状態と、現在の数値の取得
                     bool isRegistered = registeredShapeKeys.Contains(name);
                     currentExpressionValues.TryGetValue(name, out float val);
-                    return (isRegistered && !Mathf.Approximately(val, 0f)) ? 0 : (isRegistered ? 1 : 2);
+                    bool isZero = Mathf.Approximately(val, 0f);
+
+                    // 今のフレーム（currentTime）にキーがあるか調べる
+                    bool hasKeyAtCurrentTime = false;
+                    if (isRegistered && warehouse.TryGetValue(currentPath, out var tracks))
+                    {
+                        var track = tracks.Find(t => t.label == name);
+                        if (track != null)
+                        {
+                            // 倉庫のカーブを調べて、現在の時間にキーがあるか確認
+                            hasKeyAtCurrentTime = track.curve.keys.Any(k => Mathf.Approximately(k.time, currentTime));
+                        }
+                    }
+
+                    // 2. ★新規実装：5段階の優先度（スコア）を決定して並び替える
+                    if (!isRegistered) return 4; // グレー（未登録）
+
+                    if (hasKeyAtCurrentTime)
+                    {
+                        return isZero ? 1 : 0; // 0以外＝緑（0番手）、0＝水色（1番手）
+                    }
+                    else
+                    {
+                        return isZero ? 3 : 2; // 0以外＝オレンジ（2番手）、0＝白（3番手）
+                    }
                 }
                 return registeredShapeKeys.Contains(name) ? 0 : 1;
             }).ThenBy(name => list.IndexOf(name)).ToList();
@@ -1375,6 +1505,8 @@ public class VRC_ExpressionEditor : EditorWindow
 
         // 1. 【倉庫の更新】自前の棚（warehouse）から既存のカーブを取り出す
         AnimationCurve curve = null;
+        if (!warehouse.ContainsKey(path)) warehouse[path] = new List<ExpressionTrack>(); // 住所がない場合はコーナーを作る
+
         if (warehouse.TryGetValue(path, out var tracks))
         {
             var track = tracks.Find(t => t.label == shapeName);
@@ -1383,12 +1515,21 @@ public class VRC_ExpressionEditor : EditorWindow
                 curve = track.curve;
                 track.currentValue = value; // 掲示板（currentValue）も最新にしておく
             }
-        }
-
-        // もし棚にデータがなければ（新規登録時など）、新しいカーブを用意する
-        if (curve == null)
-        {
-            curve = new AnimationCurve();
+            else
+            {
+                // ★【ここを追加！】新規登録（グレーからの昇格）なので、新しくパッケージを作って棚に並べる
+                curve = new AnimationCurve();
+                var newTrack = new ExpressionTrack
+                {
+                    label = shapeName,
+                    path = path,
+                    type = binding.type,
+                    propertyName = binding.propertyName,
+                    curve = curve,
+                    currentValue = value
+                };
+                tracks.Add(newTrack); // 棚に追加！
+            }
         }
 
         // 2. 【未来対応】0f だった部分を time（変数）に変更
@@ -1488,6 +1629,55 @@ public class VRC_ExpressionEditor : EditorWindow
                 VRC_ExpressionPreview.Instance.MarkPreviewDirty(); // すっぴんに戻すフラグを立てる
             }
             VRC_ExpressionPreview.Instance.Repaint();
+        }
+    }
+    // ★新規追加：指定した時間（フレーム）のキーだけを削除する
+    private void RemoveKeyframeAtTime(AnimationClip clip, string path, string shapeName, float time)
+    {
+        var binding = EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeName);
+        AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
+        if (curve == null) return;
+
+        // 指定された時間のキーフレームを探す
+        int index = -1;
+        for (int i = 0; i < curve.keys.Length; i++)
+        {
+            if (Mathf.Approximately(curve.keys[i].time, time))
+            {
+                index = i;
+                break;
+            }
+        }
+
+        // キーが見つかったら削除する
+        if (index != -1)
+        {
+            Undo.RecordObject(clip, "キーフレーム削除");
+            curve.RemoveKey(index);
+
+            // ★もし他にキーが1つも残っていないなら、項目ごと完全に削除する（グレーに戻る）
+            if (curve.keys.Length == 0)
+            {
+                AnimationUtility.SetEditorCurve(clip, binding, null);
+                if (warehouse.TryGetValue(path, out var tracks))
+                {
+                    tracks.RemoveAll(t => t.label == shapeName);
+                }
+            }
+            else
+            {
+                // まだ他のフレームにキーがあるなら、キーを減らしたカーブを上書き保存する（白かオレンジに戻る）
+                AnimationUtility.SetEditorCurve(clip, binding, curve);
+
+                // メモリ上の倉庫のカーブも最新にする
+                if (warehouse.TryGetValue(path, out var tracks))
+                {
+                    var track = tracks.Find(x => x.label == shapeName);
+                    if (track != null) track.curve = curve;
+                }
+            }
+
+            RefreshExpressionCache();
         }
     }
 }
