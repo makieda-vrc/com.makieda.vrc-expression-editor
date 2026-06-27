@@ -754,7 +754,7 @@ public class VRC_ExpressionEditor : EditorWindow
             cachedShapeContents = new GUIContent[sortedShapeKeyNames.Count];
             for (int i = 0; i < sortedShapeKeyNames.Count; i++)
             {
-                cachedShapeContents[i] = new GUIContent(sortedShapeKeyNames[i], sortedShapeKeyNames[i]);
+                cachedShapeContents[i] = new GUIContent(sortedShapeKeyNames[i]);
             }
         }
 
@@ -822,10 +822,15 @@ public class VRC_ExpressionEditor : EditorWindow
                     // 選択中：Unity標準の選択青色で横全体を塗りつぶす
                     EditorGUI.DrawRect(rowRect, new Color(0.172f, 0.364f, 0.529f, 1.0f));
                 }
-                else if (rowRect.Contains(mousePos))
+                // ★修正：再生中でない場合のみ、ホバーハイライトを有効にする
+                else if (Event.current.type == EventType.Repaint)
                 {
-                    // ホバー中：うっすらとした青
-                    EditorGUI.DrawRect(rowRect, new Color(0.3f, 0.5f, 0.8f, 0.12f));
+                    bool isTimelinePlaying = VRC_ExpressionTimeline.Instance != null && VRC_ExpressionTimeline.Instance.IsPlaying();
+                    if (!isTimelinePlaying && rowRect.Contains(mousePos))
+                    {
+                        // ホバー中：うっすらとした青
+                        EditorGUI.DrawRect(rowRect, new Color(0.3f, 0.5f, 0.8f, 0.12f));
+                    }
                 }
             }
 
@@ -1519,7 +1524,7 @@ private void RemoveShapeKeyValue(AnimationClip clip, string shapeName, bool isMi
         for (int i = 0; i < sortedShapeKeyNames.Count; i++)
         {
             string shapeName = sortedShapeKeyNames[i];
-            cachedShapeContents[i] = new GUIContent(shapeName, shapeName);
+            cachedShapeContents[i] = new GUIContent(shapeName);
 
             float nameWidth = labelStyle.CalcSize(cachedShapeContents[i]).x;
             if (nameWidth > cachedMaxShapeNameWidth) cachedMaxShapeNameWidth = nameWidth;
