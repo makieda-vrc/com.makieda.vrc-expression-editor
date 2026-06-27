@@ -59,6 +59,10 @@ public class VRC_ExpressionEditor : EditorWindow
 
     public bool isCopyPasteMode = false;
     public HashSet<string> copyTargetShapes = new HashSet<string>();
+
+    // ★追加：現在タイムラインの絞り込み対象になっているシェイプキーの名前を保持する一時キャッシュ
+    public HashSet<string> timelineFilteredShapes = new HashSet<string>();
+
     public Dictionary<string, float> clipboardValues = new Dictionary<string, float>();
 
     public HashSet<string> copyTargetObjects = new HashSet<string>();
@@ -444,6 +448,9 @@ public class VRC_ExpressionEditor : EditorWindow
 
     private void EnsureCollectionsInitialized()
     {
+        // ★追加：一時キャッシュの初期化
+        if (timelineFilteredShapes == null) timelineFilteredShapes = new HashSet<string>();
+
         if (favoriteShapes == null) favoriteShapes = new HashSet<string>();
         if (currentExpressionValues == null) currentExpressionValues = new Dictionary<string, float>();
         if (registeredShapeKeys == null) registeredShapeKeys = new HashSet<string>();
@@ -806,12 +813,20 @@ public class VRC_ExpressionEditor : EditorWindow
             // スライダーの行（水平グループ）の範囲を記録
             Rect rowRect = EditorGUILayout.BeginHorizontal();
 
-            // ★追加①：【ホバーハイライト】マウスがこの行の上にあるとき、うっすらと青い背景を敷く
-            // （Repaintイベントの時だけ描画することで、スライダーのドラッグ操作の邪魔をしません）
-            if (Event.current.type == EventType.Repaint && rowRect.Contains(mousePos))
+            // ★変更：選択中なら横全体を濃い青、選択されておらずホバー中なら薄い青を塗る
+            bool isFiltered = timelineFilteredShapes.Contains(shapeName);
+            if (Event.current.type == EventType.Repaint)
             {
-                // Unityのプロスキンに馴染む、うっすらとした選択色（青グレー）
-                EditorGUI.DrawRect(rowRect, new Color(0.3f, 0.5f, 0.8f, 0.12f));
+                if (isFiltered)
+                {
+                    // 選択中：Unity標準の選択青色で横全体を塗りつぶす
+                    EditorGUI.DrawRect(rowRect, new Color(0.172f, 0.364f, 0.529f, 1.0f));
+                }
+                else if (rowRect.Contains(mousePos))
+                {
+                    // ホバー中：うっすらとした青
+                    EditorGUI.DrawRect(rowRect, new Color(0.3f, 0.5f, 0.8f, 0.12f));
+                }
             }
 
             float currentCheckboxWidth = 0f;
@@ -842,11 +857,82 @@ public class VRC_ExpressionEditor : EditorWindow
                 {
                     CommitShapeKeyValue(clip, shapeName, currentValue);
                 }
-                ApplySorting();
+
+                // ★追加：キーの追加・削除後にエディタの情報を更新し、タイムライン側へ即座に反映・通知する
+                RefreshExpressionCache();
+                if (VRC_ExpressionTimeline.Instance != null)
+                {
+                    VRC_ExpressionTimeline.Instance.UpdateKeyframeCache(this);
+                    VRC_ExpressionTimeline.Instance.Repaint();
+                }
+
                 ForceRepaintPreview();
             }
 
-            GUILayout.Label(shapeContent, currentLabelStyle, optShapeLabelW);
+            // ★変更：クリック判定とハイライト描画機能付きのラベル処理
+            // 2. ラベル用の領域（Rect）をあらかじめ確保して描画準備
+            Rect labelRect = GUILayoutUtility.GetRect(shapeContent, currentLabelStyle, optShapeLabelW);
+
+            // 3. 描画（Repaint）イベントのときに、文字を綺麗に塗る
+            if (Event.current.type == EventType.Repaint)
+            {
+                if (isFiltered)
+                {
+                    // 文字色を「白」に反転させて描画（背景は変更1の処理で横全体に描画済み）
+                    Color originalTextColor = currentLabelStyle.normal.textColor;
+                    currentLabelStyle.normal.textColor = Color.white;
+                    GUI.Label(labelRect, shapeContent, currentLabelStyle);
+                    currentLabelStyle.normal.textColor = originalTextColor; // 元の色に戻す
+                }
+                else
+                {
+                    // 非選択時は通常通り描画
+                    GUI.Label(labelRect, shapeContent, currentLabelStyle);
+                }
+            }
+
+            // 4. マウス左クリック時の判定（MouseDownイベントかつ左ボタン＝0 の時だけ超軽量に動作）
+            if (Event.current.type == EventType.MouseDown && Event.current.button == 0)
+            {
+                // マウスがこのラベルRectの範囲内にあるか判定
+                if (labelRect.Contains(Event.current.mousePosition))
+                {
+                    if (Event.current.shift)
+                    {
+                        // Shiftキーを押しながらクリック：複数選択（トグル）
+                        if (isFiltered) timelineFilteredShapes.Remove(shapeName);
+                        else timelineFilteredShapes.Add(shapeName);
+                    }
+                    else
+                    {
+                        // 通常クリック：単一選択
+                        if (isFiltered && timelineFilteredShapes.Count == 1)
+                        {
+                            // すでに自分だけが選択されていたら解除
+                            timelineFilteredShapes.Clear();
+                        }
+                        else
+                        {
+                            // 他をすべてクリアして自分だけを選択
+                            timelineFilteredShapes.Clear();
+                            timelineFilteredShapes.Add(shapeName);
+                        }
+                    }
+
+                    // タイムラインのキャッシュを再計算させて、表示を更新
+                    if (VRC_ExpressionTimeline.Instance != null)
+                    {
+                        VRC_ExpressionTimeline.Instance.UpdateKeyframeCache(this);
+                    }
+
+                    // 画面の再描画を命令
+                    Repaint();
+                    if (VRC_ExpressionTimeline.Instance != null) VRC_ExpressionTimeline.Instance.Repaint();
+
+                    // イベントを消費（他のUIにクリックを貫通させない）
+                    Event.current.Use();
+                }
+            }
 
             float sliderWidth = Mathf.Max(40f, viewWidth - (currentCheckboxWidth + 15f + 15f + labelWidth + 40f + 25f));
             if (lastSliderW != sliderWidth) { lastSliderW = sliderWidth; optSliderW = GUILayout.Width(sliderWidth); }
@@ -1116,6 +1202,9 @@ private void RemoveShapeKeyValue(AnimationClip clip, string shapeName, bool isMi
     public void RefreshData(bool loadFromSettings)
     {
         if (EditorApplication.isPlayingOrWillChangePlaymode || EditorApplication.isCompiling) return;
+
+        // ★追加：アバター切替やリロード時のみ、絞り込み状態を初期化する
+        if (timelineFilteredShapes != null) timelineFilteredShapes.Clear();
 
         if (rootObject == null)
         {

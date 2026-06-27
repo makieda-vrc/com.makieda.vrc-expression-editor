@@ -53,6 +53,7 @@ public class VRC_ExpressionPreview : EditorWindow
     private double lastLightCheckTime;
     private Color cachedAmbientColor = Color.gray;
     private bool replicaLightsNeedRebuild = false;
+
     // --- 追加：UIエリアの実際の高さを記録する変数（標準的な初期値として270にしておきます） ---
     private float lastUIHeight = 270f;
     private bool isAvatarChanged = true;
@@ -61,8 +62,16 @@ public class VRC_ExpressionPreview : EditorWindow
     private enum CameraTool { Pan, Orbit, Zoom }
     private CameraTool currentCameraTool = CameraTool.Orbit;
 
-    // データ復元用（アニメ書き戻し用）
-    private Dictionary<string, Dictionary<string, float>> snapshotClipValues = new Dictionary<string, Dictionary<string, float>>();
+    // ★追加・変更：スナップショット時に、そのフレームにキーが存在していたか、およびその値を記録する構造体
+    private struct SnapshotKeyInfo
+    {
+        public bool hasKey; // そのフレームにキーが存在していたか
+        public float value;  // キーが存在していた場合の値
+    }
+
+    // データ復元用（アニメ書き戻し用：一時保存キャッシュ）
+    // path -> (propertyName -> SnapshotKeyInfo)
+    private Dictionary<string, Dictionary<string, SnapshotKeyInfo>> snapshotClipValues = new Dictionary<string, Dictionary<string, SnapshotKeyInfo>>();
     private Dictionary<string, bool> snapshotClipActiveValues = new Dictionary<string, bool>();
 
     // プレビュー比較用（見た目用）
@@ -479,28 +488,23 @@ public class VRC_ExpressionPreview : EditorWindow
 
         if (Event.current.type == EventType.Repaint)
         {
-            bool isDraggingNow = editor.IsDraggingSlider();
+            // 1. 人形が存在しない場合は新規に作成する（重い処理はここだけ）
+            EnsureDummyExists(editor);
 
-            if (previewDummy == null || isDirty)
+            // 2. 表情のポーズ付けは、画面更新（Repaint）のたびに毎回確実に適用する
+            if (isComparing)
             {
-                if (isComparing)
-                {
-                    EnsureDummyExists(editor);
-                    ApplySnapshotDirectly();
-                }
-                else
-                {
-                    SetupAndPoseDummy(editor);
-                    if (isMuted) ApplyMuteExpressionDirectly(editor);
-                }
-
-                UpdatePreviewCamera();
-                isDirty = false;
+                ApplySnapshotDirectly(); // 一時比較（スナップショット）の顔を維持
             }
             else
             {
-                UpdatePreviewCamera();
+                SetupAndPoseDummy(editor); // 通常の編集状態の顔を維持
+                if (isMuted) ApplyMuteExpressionDirectly(editor); // ミュート中なら重ねてミュート適用
             }
+
+            // カメラの更新と描画
+            UpdatePreviewCamera();
+            isDirty = false;
 
             previewUtility.BeginPreview(rect, GUIStyle.none);
             SyncBuiltinLightsImmediate();
@@ -836,7 +840,7 @@ public class VRC_ExpressionPreview : EditorWindow
             string path = pair.relativePath;
             if (dummySmr == null || dummySmr.sharedMesh == null) continue;
 
-            // ★【3層構造へ接続】古い辞書の代わりに、棚のパッケージ（warehouse）から動いている項目を特定する
+            // ★変更：最新の3層構造(warehouse)から動いているキーを漏れなく特定し、デフォルト（本来の顔）に戻す
             if (editor.warehouse.TryGetValue(path, out var tracks))
             {
                 foreach (var track in tracks)
@@ -844,7 +848,6 @@ public class VRC_ExpressionPreview : EditorWindow
                     if (pair.shapeIndexMap.TryGetValue(track.label, out int index))
                     {
                         float originalValue = 0f;
-                        // アバター本来のデフォルトの数値を調べて、それを代入する（消音する）
                         if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict))
                             baseDict.TryGetValue(track.label, out originalValue);
 
@@ -852,30 +855,22 @@ public class VRC_ExpressionPreview : EditorWindow
                     }
                 }
             }
+        }
 
-            if (editor.availableSmrs != null && editor.availableSmrs.Count > editor.selectedSmrIndex)
+        // オブジェクトのアクティブもwarehouseから特定して非表示（ミュート）にする
+        foreach (var pathGroup in editor.warehouse)
+        {
+            foreach (var track in pathGroup.Value)
             {
-                if (path == editor.GetRelativePath(editor.availableSmrs[editor.selectedSmrIndex].gameObject))
+                if (track.type == typeof(GameObject) && track.propertyName == "m_IsActive")
                 {
-                    foreach (var kvp in editor.currentExpressionValues)
-                    {
-                        if (pair.shapeIndexMap.TryGetValue(kvp.Key, out int index))
-                        {
-                            float originalValue = 0f;
-                            if (editor.baseShapeKeyBackup.TryGetValue(path, out var baseDict)) baseDict.TryGetValue(kvp.Key, out originalValue);
-                            SetDummyWeight(dummySmr, index, originalValue);
-                        }
-                    }
+                    Transform t = string.IsNullOrEmpty(track.path) ? previewDummy.transform : previewDummy.transform.Find(track.path);
+                    if (t != null) t.gameObject.SetActive(false);
                 }
             }
         }
-
-        foreach (var path in editor.activeObjectValues.Keys)
-        {
-            Transform t = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path);
-            if (t != null) t.gameObject.SetActive(false);
-        }
     }
+
 
     private void ApplySnapshotDirectly()
     {
@@ -905,19 +900,42 @@ public class VRC_ExpressionPreview : EditorWindow
     private void TakeSnapshot(VRC_ExpressionEditor editor)
     {
         snapshotClipValues.Clear();
-        if (editor != null && editor.clipExpressionValues != null)
-        {
-            foreach (var kvp in editor.clipExpressionValues)
-                snapshotClipValues[kvp.Key] = new Dictionary<string, float>(kvp.Value);
-        }
-
         snapshotClipActiveValues.Clear();
-        if (editor != null && editor.activeObjectValues != null)
+
+        if (editor == null) return;
+        float time = editor.currentTime;
+
+        // ★変更：最新の3層構造(warehouse)から、現在のフレームにキーがあるかとその値をディープコピーする
+        foreach (var pathGroup in editor.warehouse)
         {
-            foreach (var kvp in editor.activeObjectValues)
-                snapshotClipActiveValues[kvp.Key] = kvp.Value;
+            string path = pathGroup.Key;
+            snapshotClipValues[path] = new Dictionary<string, SnapshotKeyInfo>();
+
+            foreach (var track in pathGroup.Value)
+            {
+                // 現在の時間(time)にキーフレームが存在するかチェック
+                bool hasKey = false;
+                float val = track.currentValue;
+
+                foreach (var k in track.curve.keys)
+                {
+                    if (Mathf.Approximately(k.time, time))
+                    {
+                        hasKey = true;
+                        val = k.value;
+                        break;
+                    }
+                }
+
+                snapshotClipValues[path][track.propertyName] = new SnapshotKeyInfo
+                {
+                    hasKey = hasKey,
+                    value = val
+                };
+            }
         }
 
+        // プレビュー表示比較用（見た目用のバックアップ）
         snapshotSMRWeights.Clear();
         snapshotObjectActives.Clear();
         if (previewDummy != null)
@@ -929,19 +947,22 @@ public class VRC_ExpressionPreview : EditorWindow
                 if (pair.dummySmr == null || pair.dummySmr.sharedMesh == null) continue;
 
                 var dict = new Dictionary<int, float>();
-                if (modifiedBlendShapes.TryGetValue(pair.dummySmr, out var indices))
+                for (int idx = 0; idx < pair.dummySmr.sharedMesh.blendShapeCount; idx++)
                 {
-                    foreach (int idx in indices) dict[idx] = pair.dummySmr.GetBlendShapeWeight(idx);
+                    dict[idx] = pair.dummySmr.GetBlendShapeWeight(idx);
                 }
                 snapshotSMRWeights[pair.relativePath] = dict;
             }
 
-            if (editor != null && editor.activeObjectValues != null)
+            foreach (var pathGroup in editor.warehouse)
             {
-                foreach (var path in editor.activeObjectValues.Keys)
+                foreach (var track in pathGroup.Value)
                 {
-                    Transform t = string.IsNullOrEmpty(path) ? previewDummy.transform : previewDummy.transform.Find(path);
-                    if (t != null) snapshotObjectActives[path] = t.gameObject.activeSelf;
+                    if (track.type == typeof(GameObject) && track.propertyName == "m_IsActive")
+                    {
+                        Transform t = string.IsNullOrEmpty(track.path) ? previewDummy.transform : previewDummy.transform.Find(track.path);
+                        if (t != null) snapshotObjectActives[track.path] = t.gameObject.activeSelf;
+                    }
                 }
             }
         }
@@ -953,40 +974,138 @@ public class VRC_ExpressionPreview : EditorWindow
         if (snapshotClipValues.Count == 0 || editor == null || editor.availableClips.Count <= editor.selectedClipIndex) return;
         AnimationClip clip = editor.availableClips[editor.selectedClipIndex];
 
+        // 1. Undo（Ctrl+Z）を有効にするための準備
         int group = Undo.GetCurrentGroup();
         Undo.SetCurrentGroupName("スナップショットから復元");
         Undo.RecordObject(clip, "スナップショットから復元");
 
-        foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+        float time = editor.currentTime;
+
+        // クリップに現在登録されているバインディング一覧を取得
+        var bindings = AnimationUtility.GetCurveBindings(clip);
+
+        // A. 現在登録されているキーに対し、スナップショットと照合して「値の復元」または「後打ちキーの削除」を行う
+        foreach (var binding in bindings)
         {
-            if (binding.propertyName.StartsWith("blendShape.") || (binding.type == typeof(GameObject) && binding.propertyName == "m_IsActive"))
+            if (!binding.propertyName.StartsWith("blendShape.") && !(binding.type == typeof(GameObject) && binding.propertyName == "m_IsActive"))
+                continue;
+
+            bool foundInSnapshot = false;
+            SnapshotKeyInfo snapInfo = default;
+
+            if (snapshotClipValues.TryGetValue(binding.path, out var propDict))
             {
-                AnimationUtility.SetEditorCurve(clip, binding, null);
+                if (propDict.TryGetValue(binding.propertyName, out snapInfo))
+                {
+                    foundInSnapshot = true;
+                }
+            }
+
+            AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
+            if (curve == null) continue;
+
+            bool changed = false;
+
+            if (foundInSnapshot && snapInfo.hasKey)
+            {
+                // ① 保存時にもキーが存在していた場合：そのフレーム（時間）のキーを元の値に書き換える（なければ追加）
+                int existingKeyIndex = -1;
+                for (int i = 0; i < curve.keys.Length; i++)
+                {
+                    if (Mathf.Approximately(curve.keys[i].time, time))
+                    {
+                        existingKeyIndex = i;
+                        break;
+                    }
+                }
+
+                if (existingKeyIndex >= 0)
+                {
+                    Keyframe kf = curve.keys[existingKeyIndex];
+                    kf.value = snapInfo.value;
+                    curve.MoveKey(existingKeyIndex, kf);
+                }
+                else
+                {
+                    curve.AddKey(time, snapInfo.value);
+                }
+                changed = true;
+            }
+            else
+            {
+                // ② 保存時にはキーが存在しなかった（＝後からこのフレームに追加登録されたキー）場合：
+                // このフレームからキーを完全に削除する
+                int existingKeyIndex = -1;
+                for (int i = 0; i < curve.keys.Length; i++)
+                {
+                    if (Mathf.Approximately(curve.keys[i].time, time))
+                    {
+                        existingKeyIndex = i;
+                        break;
+                    }
+                }
+
+                if (existingKeyIndex >= 0)
+                {
+                    curve.RemoveKey(existingKeyIndex);
+                    changed = true;
+                }
+            }
+
+            if (changed)
+            {
+                if (curve.keys.Length == 0)
+                {
+                    // もし他すべての時間にもキーが残っていないなら、バインド自体を消去（グレー状態へ戻す）
+                    AnimationUtility.SetEditorCurve(clip, binding, null);
+                }
+                else
+                {
+                    AnimationUtility.SetEditorCurve(clip, binding, curve);
+                }
             }
         }
 
-        foreach (var pathKvp in snapshotClipValues)
+        // B. 保存時にはキーを持っていたが、現在のアニメから削除されてしまった項目があれば、新規に打ち直す
+        foreach (var pathGroup in snapshotClipValues)
         {
-            string path = pathKvp.Key;
-            foreach (var shapeKvp in pathKvp.Value)
+            string path = pathGroup.Key;
+            foreach (var propGroup in pathGroup.Value)
             {
-                var binding = EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), "blendShape." + shapeKvp.Key);
-                var curve = new AnimationCurve(new Keyframe(0f, shapeKvp.Value));
-                AnimationUtility.SetEditorCurve(clip, binding, curve);
-            }
-        }
+                string propertyName = propGroup.Key;
+                SnapshotKeyInfo snapInfo = propGroup.Value; // 正しい型として安全に取得されます
 
-        foreach (var kvp in snapshotClipActiveValues)
-        {
-            var binding = EditorCurveBinding.FloatCurve(kvp.Key, typeof(GameObject), "m_IsActive");
-            var curve = new AnimationCurve(new Keyframe(0f, kvp.Value ? 1f : 0f));
-            AnimationUtility.SetEditorCurve(clip, binding, curve);
+                if (snapInfo.hasKey)
+                {
+                    System.Type memberType = propertyName.StartsWith("blendShape.") ? typeof(SkinnedMeshRenderer) : typeof(GameObject);
+                    var binding = EditorCurveBinding.FloatCurve(path, memberType, propertyName);
+                    AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
+
+                    if (curve == null)
+                    {
+                        curve = new AnimationCurve();
+                        curve.AddKey(time, snapInfo.value);
+                        AnimationUtility.SetEditorCurve(clip, binding, curve);
+                    }
+                }
+            }
         }
 
         Undo.CollapseUndoOperations(group);
+
+        // Assetを保存し、エディタ・タイムラインを即座にリフレッシュ（これでCtrl+Zに完全対応）
+        AssetDatabase.SaveAssets();
         editor.RefreshExpressionCache();
         editor.ApplySorting();
         editor.ForceRepaintPreview();
+
+        if (VRC_ExpressionTimeline.Instance != null)
+        {
+            VRC_ExpressionTimeline.Instance.UpdateKeyframeCache(editor);
+            VRC_ExpressionTimeline.Instance.Repaint();
+        }
+
+        Debug.Log("<color=cyan>[表情エディタ]</color> スナップショットから完全に復元しました（他フレーム保護・Undo対応）。");
     }
 
     private void DrawIconCapturePanel(VRC_ExpressionEditor editor)

@@ -92,9 +92,26 @@ public class VRC_ExpressionTimeline : EditorWindow
         if (isPlaying)
         {
             var editor = VRC_ExpressionEditor.Instance;
-            if (editor != null) editor.currentTime = Mathf.Round(editor.currentTime * 60f) / 60f;
+            if (editor != null)
+            {
+                // 1. 再生時間を 0F (0秒目) に戻す
+                editor.currentTime = 0f;
+
+                // 2. 0F時点での表情データをカーブから再計算して適用する
+                foreach (var g in editor.warehouse.Values)
+                {
+                    foreach (var t in g)
+                    {
+                        t.currentValue = t.curve.Evaluate(0f);
+                    }
+                }
+
+                // 3. プレビューアバターの表示を強制的に更新（塗り直し）する
+                editor.ForceRepaintPreview(true);
+            }
+
             isPlaying = false;
-            SyncBillboardToEditor();
+            SyncBillboardToEditor(); // エディタ側の表示値と同期する
             Repaint();
         }
     }
@@ -173,9 +190,26 @@ public class VRC_ExpressionTimeline : EditorWindow
     public void UpdateKeyframeCache(VRC_ExpressionEditor editor)
     {
         cachedKeyframeTimes.Clear();
+
+        // エディタ側で何かシェイプキーが左クリック選択されているか判定
+        bool hasFilter = editor.timelineFilteredShapes != null && editor.timelineFilteredShapes.Count > 0;
+
         foreach (var list in editor.warehouse.Values)
+        {
             foreach (var t in list)
-                foreach (var k in t.curve.keys) cachedKeyframeTimes.Add(k.time);
+            {
+                // ★追加：絞り込みが有効な場合、選択されたシェイプキー（t.label）以外のキーフレームは無視する
+                if (hasFilter && !editor.timelineFilteredShapes.Contains(t.label))
+                {
+                    continue;
+                }
+
+                foreach (var k in t.curve.keys)
+                {
+                    cachedKeyframeTimes.Add(k.time);
+                }
+            }
+        }
         cachedKeyframeTimes = cachedKeyframeTimes.Distinct().ToList();
 
         displayKeyTimes = new List<float>(cachedKeyframeTimes);
@@ -728,7 +762,7 @@ public class VRC_ExpressionTimeline : EditorWindow
 
         GUILayout.FlexibleSpace();
 
-        if (GUILayout.Button("Reset Zoom", EditorStyles.toolbarButton, GUILayout.Width(80))) { StopPlayback(); zoomLevel = 1.0f; UpdateKeyframeCache(editor); editor.currentTime = 0f; }
+        if (GUILayout.Button("Reset Zoom", EditorStyles.toolbarButton, GUILayout.Width(80))) { StopPlayback(); zoomLevel = 1.0f; UpdateKeyframeCache(editor); }
         GUI.backgroundColor = isLoop ? new Color(0.6f, 1.0f, 0.6f) : oldBg;
         if (GUILayout.Button("ループ", EditorStyles.toolbarButton, GUILayout.Width(70))) isLoop = !isLoop;
         GUI.backgroundColor = oldBg;
