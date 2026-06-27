@@ -20,16 +20,17 @@ public class VRC_ExpressionTimeline : EditorWindow
     private bool[] lastLayers;
     private ExpressionTrack lastTrackReference;
     private List<float> cachedKeyframeTimes = new List<float>();
+    private float maxKeyTime = 0f; // 最終キーフレームの時間
 
     private GUIStyle tooltipStyle;
     private GUIStyle rulerLabelStyle;
 
     // ズームとスクロール用の変数
     private float zoomLevel = 1.0f;
-    private float visibleDuration = 5.0f; // 初期状態は 5.0秒（300F）
+    private float visibleDuration = 5.0f; // 動的に上書きされます
     private Vector2 scrollPos;
 
-    // 表情アニメの標準規格：5秒（300フレーム）の空き地を確保
+    // 表情アニメの標準規格：5秒（300フレーム）の初期空き地を確保
     private const float BASE_DURATION = 5.0f;
 
     [MenuItem("Tools/VRC Expression Editor/Animation Timeline")]
@@ -100,12 +101,22 @@ public class VRC_ExpressionTimeline : EditorWindow
         lastUpdateTime = currentTimeSinceStartup;
         editor.currentTime += (float)deltaTime * playbackSpeed;
 
-        float clipLength = (currentClip != null) ? Mathf.Max(currentClip.length, editor.currentTime) : Mathf.Max(BASE_DURATION, editor.currentTime);
+        // ループ判定の基準時間を「最終キー時間」または「クリップ長」から動的に算出（最小0.01秒を確保）
+        float animationLength = Mathf.Max(maxKeyTime, (currentClip != null) ? currentClip.length : BASE_DURATION);
+        float loopEndTime = Mathf.Max(animationLength, 0.01f);
 
-        if (editor.currentTime > clipLength)
+        if (editor.currentTime > loopEndTime)
         {
-            if (isLoop) editor.currentTime = 0f;
-            else { editor.currentTime = Mathf.Round(clipLength * 60f) / 60f; StopPlayback(); return; }
+            if (isLoop)
+            {
+                editor.currentTime = 0f;
+            }
+            else
+            {
+                editor.currentTime = Mathf.Round(loopEndTime * 60f) / 60f;
+                StopPlayback();
+                return;
+            }
         }
 
         foreach (var pathGroup in editor.warehouse.Values)
@@ -115,7 +126,6 @@ public class VRC_ExpressionTimeline : EditorWindow
         Repaint();
     }
 
-    // ★【修正】：アクセス権を public に統一
     public void UpdateKeyframeCache(VRC_ExpressionEditor editor)
     {
         cachedKeyframeTimes.Clear();
@@ -123,6 +133,18 @@ public class VRC_ExpressionTimeline : EditorWindow
             foreach (var t in list)
                 foreach (var k in t.curve.keys) cachedKeyframeTimes.Add(k.time);
         cachedKeyframeTimes = cachedKeyframeTimes.Distinct().ToList();
+
+        // 最終キーフレームの位置（時間）を更新
+        maxKeyTime = cachedKeyframeTimes.Count > 0 ? cachedKeyframeTimes.Max() : 0f;
+
+        // 初期表示範囲（visibleDuration）を、アニメーション全体の長さ＋2%のマージンに自動設定
+        AnimationClip clip = (editor.availableClips.Count > editor.selectedClipIndex) ? editor.availableClips[editor.selectedClipIndex] : null;
+        float rawLength = Mathf.Max(maxKeyTime, (clip != null) ? clip.length : BASE_DURATION);
+
+        // 極端に短いアニメーションや0秒のアニメの場合でも、最低1.0秒（60フレーム）の表示領域を確保
+        visibleDuration = Mathf.Max(1.0f, rawLength * 1.02f);
+        zoomLevel = 1.0f; // 表示を初期化
+
         Repaint();
     }
 
@@ -157,11 +179,11 @@ public class VRC_ExpressionTimeline : EditorWindow
 
         DrawTopToolbar(editor, clip);
 
-        // ★修正①：ズーム計算（HandleZoom）は、ScrollViewの「外側（手前）」で呼ぶのが絶対ルール（これで遅延ズレが完全に消えます）
+        // ズーム計算（HandleZoom）はScrollViewの外側で実行
         HandleZoom();
 
-        float clipLength = (clip != null) ? Mathf.Max(clip.length, BASE_DURATION) : BASE_DURATION;
-        float rawMaxLen = Mathf.Max(clipLength, editor.currentTime);
+        float animationLength = Mathf.Max(maxKeyTime, (clip != null) ? clip.length : BASE_DURATION);
+        float rawMaxLen = Mathf.Max(animationLength, editor.currentTime);
 
         float visibleMaxLen;
         float timelineWidth;
@@ -175,8 +197,8 @@ public class VRC_ExpressionTimeline : EditorWindow
         }
         else
         {
-            // ★修正②：あなたの計算通り、定規の最大時間に「画面の半分の時間（visibleDuration * 0.5f）」をプラスして、右側に余白を作ります。
-            visibleMaxLen = rawMaxLen + (visibleDuration * 0.5f);
+            // 最大時間に2%のマージンをプラスして右側に余白を作成
+            visibleMaxLen = rawMaxLen * 1.02f;
             timelineWidth = viewWidth * (visibleMaxLen / visibleDuration);
         }
 
@@ -186,33 +208,57 @@ public class VRC_ExpressionTimeline : EditorWindow
         float scrollbarHeight = 16f;
         float availableHeight = position.height - toolbarHeight - scrollbarHeight;
 
-        // スクロールバーの自動化
-        scrollPos = EditorGUILayout.BeginScrollView(scrollPos, false, false, GUILayout.ExpandHeight(true));
+        // 【修正】GUILayout.BeginScrollView を用いて縦スクロールバーのみ GUIStyle.none（非表示）を割り当て
+        scrollPos = GUILayout.BeginScrollView(
+            scrollPos,
+            false,
+            false,
+            GUI.skin.horizontalScrollbar,
+            GUIStyle.none,
+            GUILayout.ExpandHeight(true)
+        );
 
-        // 正確な横幅（timelineWidth）で領域を確保（末尾に余計なピクセルは足しません）
+        // 【修正】高さを元の設計に戻し、二重マイナスによるずれを防止
         GUILayout.Label("", GUILayout.Width(timelineWidth), GUILayout.Height(Mathf.Max(availableHeight, 40)));
         Rect areaRect = GUILayoutUtility.GetLastRect();
 
-        float centerY = areaRect.y + (areaRect.height / 2f) + 8f; //重心調整
+        float centerY = areaRect.y + (areaRect.height / 2f) + 8f; // 重心調整
 
         if (Event.current.type == EventType.Repaint)
         {
-            DrawRulerAndGrid(areaRect, startX, timelineWidth, totalFrames, visibleMaxLen);
+            // 目盛りの描画（中央揃え・画面外カリング対応版）
+            DrawRulerAndGrid(areaRect, startX, timelineWidth, totalFrames, visibleMaxLen, viewWidth, centerY);
 
-            // キーフレーム（白い線）
+            // キーフレーム（白い垂直線・画面内にある場合のみ描画）
             GUI.color = Color.white;
             foreach (float t in cachedKeyframeTimes)
             {
                 if (t <= visibleMaxLen)
                 {
                     float x = startX + (t / visibleMaxLen) * timelineWidth;
-                    GUI.DrawTexture(new Rect(x - 1, centerY - 10, 2, 20), EditorGUIUtility.whiteTexture);
+                    if (x >= scrollPos.x - 2f && x <= scrollPos.x + viewWidth + 2f)
+                    {
+                        GUI.DrawTexture(new Rect(x - 1, centerY - 10, 2, 20), EditorGUIUtility.whiteTexture);
+                    }
                 }
             }
-            // 再生ヘッド（赤い線）
+
+            // ループ終端（落ち着いたブルーの垂直線・画面内にある場合のみ描画）
+            float loopEndX = startX + (maxKeyTime / visibleMaxLen) * timelineWidth;
+            if (maxKeyTime <= visibleMaxLen && loopEndX >= scrollPos.x - 2f && loopEndX <= scrollPos.x + viewWidth + 2f)
+            {
+                // 画像から抽出した目に優しいくすみブルー (#53A3D4)
+                GUI.color = new Color(0.325f, 0.639f, 0.831f, 1.0f);
+                GUI.DrawTexture(new Rect(loopEndX - 1, areaRect.y + 15, 2, areaRect.height - 15), EditorGUIUtility.whiteTexture);
+            }
+
+            // 再生ヘッド（赤い垂直線・画面内にある場合のみ描画）
             float playheadX = startX + (editor.currentTime / visibleMaxLen) * timelineWidth;
-            GUI.color = new Color(1f, 0.3f, 0.3f, 1f);
-            GUI.DrawTexture(new Rect(playheadX - 1, areaRect.y, 2, areaRect.height), EditorGUIUtility.whiteTexture);
+            if (playheadX >= scrollPos.x - 2f && playheadX <= scrollPos.x + viewWidth + 2f)
+            {
+                GUI.color = new Color(1f, 0.3f, 0.3f, 1f);
+                GUI.DrawTexture(new Rect(playheadX - 1, areaRect.y + 15, 2, areaRect.height - 15), EditorGUIUtility.whiteTexture);
+            }
             GUI.color = Color.white;
         }
 
@@ -237,7 +283,7 @@ public class VRC_ExpressionTimeline : EditorWindow
             }
         }
 
-        // スライダー（最大値を visibleMaxLen とする）
+        // スライダー
         Rect sliderRect = new Rect(startX - 6, centerY - 10, timelineWidth + 12, 20);
         EditorGUI.BeginChangeCheck();
         float nt = GUI.HorizontalSlider(sliderRect, editor.currentTime, 0f, visibleMaxLen);
@@ -248,7 +294,7 @@ public class VRC_ExpressionTimeline : EditorWindow
             foreach (var g in editor.warehouse.Values) foreach (var t in g) t.currentValue = t.curve.Evaluate(editor.currentTime);
             SyncBillboardToEditor(); editor.ForceRepaintPreview(true);
         }
-        EditorGUILayout.EndScrollView();
+        GUILayout.EndScrollView();
     }
 
     private void DrawTopToolbar(VRC_ExpressionEditor editor, AnimationClip clip)
@@ -288,7 +334,7 @@ public class VRC_ExpressionTimeline : EditorWindow
         if (DrawSpeedButton("x1.5", 1.5f)) playbackSpeed = 1.5f;
 
         GUILayout.FlexibleSpace();
-        if (GUILayout.Button("Reset Zoom", EditorStyles.toolbarButton, GUILayout.Width(80))) { StopPlayback(); zoomLevel = 1.0f; visibleDuration = BASE_DURATION; editor.currentTime = 0f; }
+        if (GUILayout.Button("Reset Zoom", EditorStyles.toolbarButton, GUILayout.Width(80))) { StopPlayback(); zoomLevel = 1.0f; UpdateKeyframeCache(editor); editor.currentTime = 0f; }
         GUI.backgroundColor = isLoop ? new Color(0.6f, 1.0f, 0.6f) : oldBg;
         if (GUILayout.Button("🔄 ループ", EditorStyles.toolbarButton, GUILayout.Width(70))) isLoop = !isLoop;
         GUI.backgroundColor = oldBg;
@@ -306,13 +352,13 @@ public class VRC_ExpressionTimeline : EditorWindow
             var editor = VRC_ExpressionEditor.Instance;
             if (editor == null) return;
             AnimationClip clip = (editor.availableClips.Count > editor.selectedClipIndex) ? editor.availableClips[editor.selectedClipIndex] : null;
-            float clipLength = (clip != null) ? Mathf.Max(clip.length, BASE_DURATION) : BASE_DURATION;
+            float animationLength = Mathf.Max(maxKeyTime, (clip != null) ? clip.length : BASE_DURATION);
 
             // ズーム用の最大時間を算出
-            float rawMaxLen = Mathf.Max(clipLength, editor.currentTime);
+            float rawMaxLen = Mathf.Max(animationLength, editor.currentTime);
 
-            // ★修正③：時間全体の最大幅（`visibleMaxLen`）に、OnGUI と完全に同じ「画面半分の時間の余白（visibleDuration * 0.5f）」を足してズームの計算をする
-            float visibleMaxLenBefore = (visibleDuration > rawMaxLen) ? visibleDuration : rawMaxLen + (visibleDuration * 0.5f);
+            // 2%のマージンを考慮
+            float visibleMaxLenBefore = (visibleDuration > rawMaxLen) ? visibleDuration : rawMaxLen * 1.02f;
 
             // スクロール内のマウスの絶対座標を計算
             float mouseLocalX = e.mousePosition.x;
@@ -331,11 +377,11 @@ public class VRC_ExpressionTimeline : EditorWindow
                 visibleDuration = Mathf.Max(visibleDuration / step, 0.5f);
             }
 
-            float visibleMaxLenAfter = (visibleDuration > rawMaxLen) ? visibleDuration : rawMaxLen + (visibleDuration * 0.5f);
+            float visibleMaxLenAfter = (visibleDuration > rawMaxLen) ? visibleDuration : rawMaxLen * 1.02f;
             zoomLevel = visibleMaxLenAfter / visibleDuration;
             float newTimelineWidth = viewWidth * Mathf.Max(1.0f, zoomLevel);
 
-            // ★修正④：ズーム後に、マウスの下にあったフレームが完全に同じピクセル位置に留まるようにスクロール位置を調整
+            // ズーム後に、マウスの下にあったフレームが完全に同じピクセル位置に留まるようにスクロール位置を調整
             scrollPos.x = (timeAtMouse / visibleMaxLenAfter) * newTimelineWidth - mouseLocalX + 12f;
             scrollPos.x = Mathf.Clamp(scrollPos.x, 0f, Mathf.Max(0f, newTimelineWidth - viewWidth));
 
@@ -352,27 +398,54 @@ public class VRC_ExpressionTimeline : EditorWindow
         }
     }
 
-    private void DrawRulerAndGrid(Rect areaRect, float startX, float timelineWidth, int totalFrames, float maxLen)
+    private void DrawRulerAndGrid(Rect areaRect, float startX, float timelineWidth, int totalFrames, float maxLen, float viewWidth, float centerY)
     {
-        int step = 1;
         float pixelsPerFrame = timelineWidth / Mathf.Max(totalFrames, 1);
-        if (pixelsPerFrame < 30) step = 5;
-        if (pixelsPerFrame < 15) step = 10;
-        if (pixelsPerFrame < 5) step = 30;
-        if (pixelsPerFrame < 2) step = 60;
-        if (pixelsPerFrame < 0.5f) step = 120;
+
+        // 主目盛り（長い目盛り）の間隔を決定
+        int step = 10;
+        if (pixelsPerFrame < 2.5f) step = 30; // 1Fあたり2.5px未満で30F刻みに
+        if (pixelsPerFrame < 0.8f) step = 60;
+        if (pixelsPerFrame < 0.4f) step = 120;
         if (pixelsPerFrame < 0.1f) step = 300;
 
-        for (int i = 0; i <= totalFrames; i++)
+        // 現在の表示領域に存在するフレーム番号の範囲のみを算出（画面外カリング）
+        int startFrame = Mathf.FloorToInt(scrollPos.x / pixelsPerFrame);
+        startFrame = Mathf.Max(0, startFrame - 1); // 画面左端での見切れを防止するためのマージン
+
+        int endFrame = Mathf.CeilToInt((scrollPos.x + viewWidth) / pixelsPerFrame);
+        endFrame = Mathf.Min(totalFrames, endFrame + 1); // 画面右端での見切れを防止するためのマージン
+
+        // 元コードの「長い縦線の長さ（高さ）」を算出
+        float longLineHeight = areaRect.height - 15f;
+        float longLineY = areaRect.y + 15f;
+
+        for (int i = startFrame; i <= endFrame; i++)
         {
             float x = startX + ((i / 60f) / maxLen) * timelineWidth;
+
+            // ①：主目盛り（10F刻みの区切り線 ＋ 数値テキスト）
             if (i % step == 0)
             {
-                GUI.color = Color.white;
+                // テキスト（上部に配置）
+                GUI.color = new Color(1f, 1f, 1f, 0.7f);
                 Rect labelRect = new Rect(x - 25, areaRect.y, 50, 15);
                 GUI.Label(labelRect, i.ToString(), rulerLabelStyle);
-                GUI.color = new Color(1, 1, 1, 0.2f);
-                GUI.DrawTexture(new Rect(x, areaRect.y + 15, 1, areaRect.height - 15), EditorGUIUtility.whiteTexture);
+
+                // 上から下まで届く長い縦線（元のコードの仕様に戻してスライダー全体を貫通）
+                GUI.color = new Color(1f, 1f, 1f, 0.40f);
+                GUI.DrawTexture(new Rect(x, longLineY, 1, longLineHeight), EditorGUIUtility.whiteTexture);
+            }
+            // ②：副目盛り（1Fごとの細かい短い線・数値なし）
+            // 1Fあたりの幅が 3.0ピクセル 以上離れている場合のみ処理
+            else if (pixelsPerFrame >= 3.0f)
+            {
+                // 主目盛りの長さ（longLineHeight）の「50%」の高さで、中央スライダー（centerY）を基準に中央揃えで描画
+                float shortLineHeight = longLineHeight * 0.8f;
+                float shortLineY = centerY - (shortLineHeight / 2f);
+
+                GUI.color = new Color(1f, 1f, 1f, 0.25f);
+                GUI.DrawTexture(new Rect(x, shortLineY, 1, shortLineHeight), EditorGUIUtility.whiteTexture);
             }
         }
         GUI.color = Color.white;
@@ -385,7 +458,7 @@ public class VRC_ExpressionTimeline : EditorWindow
             tooltipStyle = new GUIStyle(EditorStyles.helpBox) { fontSize = 11, alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold };
             tooltipStyle.normal.textColor = Color.white;
             rulerLabelStyle = new GUIStyle(EditorStyles.label) { fontSize = 9, alignment = TextAnchor.LowerCenter };
-            rulerLabelStyle.normal.textColor = new Color(1f, 1f, 1f, 0.6f);
+            rulerLabelStyle.normal.textColor = new Color(1f, 1f, 1f, 0.7f);
         }
     }
 

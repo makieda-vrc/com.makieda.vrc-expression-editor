@@ -50,11 +50,11 @@ public class VRC_ExpressionPreview : EditorWindow
     private List<BuiltinLightSync> activeBuiltinSyncs = new List<BuiltinLightSync>();
     private Dictionary<int, bool> lastLightSnapshots = new Dictionary<int, bool>();
     private GameObject previewLightsRoot;
-
     private double lastLightCheckTime;
     private Color cachedAmbientColor = Color.gray;
-
     private bool replicaLightsNeedRebuild = false;
+    // --- 追加：UIエリアの実際の高さを記録する変数（標準的な初期値として270にしておきます） ---
+    private float lastUIHeight = 270f;
     private bool isAvatarChanged = true;
     private bool isDirty = true;
 
@@ -469,7 +469,9 @@ public class VRC_ExpressionPreview : EditorWindow
         if (editor == null || editor.rootObject == null) { EditorGUILayout.HelpBox("アバターを設定してください。", MessageType.Info); CleanupPreview(); return; }
         if (editor.rootObject != lastRootObject) { CleanupPreview(); lastRootObject = editor.rootObject; isAvatarChanged = true; FindAndCacheSceneLight(); MarkPreviewDirty(); }
 
-        float cameraHeight = Mathf.Max(150f, position.height - 330f);
+        // ★遊びを 10px に縮め、カメラの高さを決定します
+        float uiNeededHeight = lastUIHeight + 8f;
+        float cameraHeight = Mathf.Max(150f, position.height - uiNeededHeight - 10f);
         Rect rect = new Rect(10, 10, position.width - 20, cameraHeight);
         EditorGUI.DrawRect(rect, new Color(0.15f, 0.15f, 0.15f, 1f));
 
@@ -520,21 +522,37 @@ public class VRC_ExpressionPreview : EditorWindow
             if (rTex != null) GUI.DrawTexture(rect, rTex, ScaleMode.StretchToFill, false);
         }
 
-        float uiTop = cameraHeight + 20f;
-        float uiHeight = position.height - uiTop - 10f;
+        float uiTop = cameraHeight + 10f;
+        float uiHeight = position.height - uiTop;
 
         if (uiHeight > 30f)
         {
             GUILayout.BeginArea(new Rect(10, uiTop, position.width - 20, uiHeight));
             uiScrollPos = EditorGUILayout.BeginScrollView(uiScrollPos);
 
+            GUILayout.Space(1);
+
             DrawPreviewToolbar(editor);
             DrawBlendingTestPanel(editor);
             DrawSnapshotPanel(editor);
             DrawIconCapturePanel(editor);
 
+            GUILayout.Space(1);
+            Rect finalRect = GUILayoutUtility.GetLastRect();
+
             EditorGUILayout.EndScrollView();
             GUILayout.EndArea();
+
+            if (Event.current.type == EventType.Repaint)
+            {
+                float measuredHeight = finalRect.yMax;
+
+                if (Mathf.Abs(lastUIHeight - measuredHeight) > 1f)
+                {
+                    lastUIHeight = measuredHeight;
+                    Repaint();
+                }
+            }
         }
     }
 
@@ -1029,9 +1047,24 @@ public class VRC_ExpressionPreview : EditorWindow
     private void OptimizeWindowSize()
     {
         Rect currentRect = this.position;
-        float cameraWidth = currentRect.width - 20f; float cameraHeight = currentRect.height - 330f;
-        float targetWidth = currentRect.width; float targetHeight = currentRect.height;
-        if (cameraWidth > cameraHeight) targetWidth = cameraHeight + 20f; else targetHeight = cameraWidth + 330f;
+
+        // ★【修正】遊びを減らしたのに合わせて、合計の余白を 30f から 20f に変更します
+        float uiTotalHeight = lastUIHeight + 18f;
+
+        float cameraWidth = currentRect.width - 20f;
+        float cameraHeight = currentRect.height - uiTotalHeight;
+        float targetWidth = currentRect.width;
+        float targetHeight = currentRect.height;
+
+        if (cameraWidth > cameraHeight)
+        {
+            targetWidth = cameraHeight + 20f;
+        }
+        else
+        {
+            targetHeight = cameraWidth + uiTotalHeight;
+        }
+
         this.position = new Rect(currentRect.x, currentRect.y, targetWidth, targetHeight);
     }
 
