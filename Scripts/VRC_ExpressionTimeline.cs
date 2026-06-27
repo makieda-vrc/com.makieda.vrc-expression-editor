@@ -136,7 +136,14 @@ public class VRC_ExpressionTimeline : EditorWindow
         SkinnedMeshRenderer currentMesh = (editor.availableSmrs.Count > editor.selectedSmrIndex) ? editor.availableSmrs[editor.selectedSmrIndex] : null;
         if (currentMesh != lastMesh) { StopPlayback(); lastMesh = currentMesh; return; }
 
-        if (editor.selectedLayers != null && lastLayers != null && !editor.selectedLayers.SequenceEqual(lastLayers)) { StopPlayback(); return; }
+        if (editor.selectedLayers != null && lastLayers != null)
+        {
+            if (editor.selectedLayers.Length != lastLayers.Length) { StopPlayback(); return; }
+            for (int i = 0; i < editor.selectedLayers.Length; i++)
+            {
+                if (editor.selectedLayers[i] != lastLayers[i]) { StopPlayback(); return; }
+            }
+        }
 
         double deltaTime = currentTimeSinceStartup - lastUpdateTime;
         lastUpdateTime = currentTimeSinceStartup;
