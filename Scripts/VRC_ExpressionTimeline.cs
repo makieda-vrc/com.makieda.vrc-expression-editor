@@ -15,20 +15,20 @@ public class VRC_ExpressionTimeline : EditorWindow
     private bool isLoop = true;
     private bool isKeySnap = true; // キー吸着モード
 
-    // --- 監視・UIテスト用のスナップショット ---
+    // --- 監視用のスナップショット ---
     private AnimationClip lastClip;
     private SkinnedMeshRenderer lastMesh;
     private bool[] lastLayers;
     private ExpressionTrack lastTrackReference;
-    private List<float> cachedKeyframeTimes = new List<float>();
+    private List<float> cachedKeyframeTimes = new List<float>(); // 白い線用の実データ時間
     private float maxKeyTime = 0f;
 
-    // --- ★【UIテスト用】モック（仮データ）用の変数 ---
-    private List<float> mockKeyTimes = new List<float>();
-    private List<float> selectedMockTimes = new List<float>();
+    // --- UI表示・選択用の変数（実データと同期） ---
+    private List<float> displayKeyTimes = new List<float>();
+    private HashSet<float> selectedKeyTimes = new HashSet<float>();
 
     // ドラッグ制御用の一時変数
-    private bool isDraggingMock = false;
+    private bool isDraggingKey = false;
     private float dragStartMouseX = 0f;
     private List<float> dragStartKeyTimes = new List<float>();
 
@@ -37,7 +37,7 @@ public class VRC_ExpressionTimeline : EditorWindow
     private Vector2 boxSelectStart;
     private Rect boxSelectRect;
 
-    // ★【新規】確定した選択ボックスの維持・ドラッグ用変数
+    // 確定した選択ボックスの維持・ドラッグ用変数
     private float selectedRangeStart = -1f; // 確定選択範囲の開始時間（秒）
     private float selectedRangeEnd = -1f;   // 確定選択範囲の終了時間（秒）
     private bool isDraggingRange = false;   // 選択ボックス自体をドラッグ中か
@@ -61,8 +61,31 @@ public class VRC_ExpressionTimeline : EditorWindow
         Instance.Show();
     }
 
-    private void OnEnable() { Instance = this; EditorApplication.update += OnUpdate; }
-    private void OnDisable() { StopPlayback(); EditorApplication.update -= OnUpdate; }
+    private void OnEnable()
+    {
+        Instance = this;
+        EditorApplication.update += OnUpdate;
+        Undo.undoRedoPerformed += OnUndoRedo;
+    }
+
+    private void OnDisable()
+    {
+        StopPlayback();
+        EditorApplication.update -= OnUpdate;
+        Undo.undoRedoPerformed -= OnUndoRedo;
+    }
+
+    private void OnUndoRedo()
+    {
+        var editor = VRC_ExpressionEditor.Instance;
+        if (editor != null)
+        {
+            editor.RefreshExpressionCache();
+            UpdateKeyframeCache(editor);
+            editor.ForceRepaintPreview(true);
+            Repaint();
+        }
+    }
 
     public void StopPlayback()
     {
@@ -148,9 +171,8 @@ public class VRC_ExpressionTimeline : EditorWindow
                 foreach (var k in t.curve.keys) cachedKeyframeTimes.Add(k.time);
         cachedKeyframeTimes = cachedKeyframeTimes.Distinct().ToList();
 
-        // ★【UIテスト用】モックデータの初期化
-        mockKeyTimes = new List<float>(cachedKeyframeTimes);
-        selectedMockTimes.Clear();
+        displayKeyTimes = new List<float>(cachedKeyframeTimes);
+        selectedKeyTimes.Clear();
         selectedRangeStart = -1f;
         selectedRangeEnd = -1f;
 
@@ -185,15 +207,14 @@ public class VRC_ExpressionTimeline : EditorWindow
 
     private float GetSnappedTime(float rawTime)
     {
-        if (isKeySnap && mockKeyTimes.Count > 0)
+        if (isKeySnap && displayKeyTimes.Count > 0)
         {
-            float closestKey = mockKeyTimes.OrderBy(t => Mathf.Abs(t - rawTime)).First();
+            float closestKey = displayKeyTimes.OrderBy(t => Mathf.Abs(t - rawTime)).First();
             if (Mathf.Abs(closestKey - rawTime) <= 1.5f / 60f) return closestKey;
         }
         return Mathf.Round(rawTime * 60f) / 60f;
     }
 
-    // ピクセルX座標からスナップされた「時間（秒）」を算出するヘルパー
     private float GetSnappedTimeAtX(float pixelX, float startX, float timelineWidth, float visibleMaxLen)
     {
         float rawTime = ((pixelX - startX) / timelineWidth) * visibleMaxLen;
@@ -238,33 +259,26 @@ public class VRC_ExpressionTimeline : EditorWindow
         GUILayout.Label("", GUILayout.Width(timelineWidth), GUILayout.Height(contentHeight));
         Rect areaRect = GUILayoutUtility.GetLastRect();
 
-        float centerY = areaRect.y + (areaRect.height / 2f) + 16f; // スライダー中心を高さに連動
-        float keyLaneY = areaRect.y + 15f; // ◇を描画する操作レーンの上端Y座標（高さ16px）
+        float centerY = areaRect.y + (areaRect.height / 2f) + 16f;
+        float keyLaneY = areaRect.y + 15f;
 
-        // マウスイベント処理（1F吸着・レーン上端固定・範囲ドラッグ移動に対応）
         HandleMouseEvents(startX, timelineWidth, visibleMaxLen, viewWidth, keyLaneY);
 
         if (Event.current.type == EventType.Repaint)
         {
-            // 1. 目盛りの描画（副線は主線の50%で、centerYを中心に十字交差）
             DrawRulerAndGrid(areaRect, startX, timelineWidth, totalFrames, visibleMaxLen, viewWidth, centerY);
 
-            // 【目隠し処理】キーレーン（◇◆の背景）を暗いグレーで塗りつぶし、後ろを貫通する縦線を覆い隠す
             Rect bgRect = new Rect(scrollPos.x, keyLaneY, viewWidth + 24, 16f);
             EditorGUI.DrawRect(bgRect, new Color(0.18f, 0.18f, 0.18f, 1.0f));
 
-            // 確定選択ボックスの残像描画（ボックス選択中でない、かつ選択キーが存在する場合に薄く表示）
-            if (!isBoxSelecting && selectedRangeStart >= 0f && selectedMockTimes.Count > 0)
+            if (!isBoxSelecting && selectedRangeStart >= 0f && selectedKeyTimes.Count > 0)
             {
                 float rxStart = startX + (selectedRangeStart / visibleMaxLen) * timelineWidth;
                 float rxEnd = startX + (selectedRangeEnd / visibleMaxLen) * timelineWidth;
                 Rect rangeBoxRect = new Rect(rxStart, keyLaneY, Mathf.Max(2f, rxEnd - rxStart), 16f);
-
-                // 確定した範囲として視覚的に残す（非常に薄いブルー）
                 DrawOutlineRect(rangeBoxRect, new Color(0.325f, 0.639f, 0.831f, 0.08f), new Color(0.325f, 0.639f, 0.831f, 0.40f));
             }
 
-            // 2. 実データのキーを示す「白い縦線」の描画（モック用とは完全分離）
             GUI.color = Color.white;
             foreach (float t in cachedKeyframeTimes)
             {
@@ -279,16 +293,15 @@ public class VRC_ExpressionTimeline : EditorWindow
             }
             GUI.color = Color.white;
 
-            // 3. 【UIテスト用】モックデータのキーフレーム（◇・◆）の描画
-            foreach (float t in mockKeyTimes)
+            foreach (float t in displayKeyTimes)
             {
                 if (t <= visibleMaxLen)
                 {
                     float x = startX + (t / visibleMaxLen) * timelineWidth;
                     if (x >= scrollPos.x - 10f && x <= scrollPos.x + viewWidth + 10f)
                     {
-                        float diamondY = keyLaneY + 8f; // レーンの中心
-                        if (selectedMockTimes.Contains(t))
+                        float diamondY = keyLaneY + 8f;
+                        if (selectedKeyTimes.Contains(t))
                             DrawDiamond(x, diamondY, 8f, new Color(0.325f, 0.639f, 0.831f, 1.0f), true);
                         else
                             DrawDiamond(x, diamondY, 8f, Color.white, false);
@@ -297,7 +310,6 @@ public class VRC_ExpressionTimeline : EditorWindow
             }
             GUI.color = Color.white;
 
-            // 4. ループ終端（くすみブルーの線）
             float loopEndX = startX + (maxKeyTime / visibleMaxLen) * timelineWidth;
             if (maxKeyTime <= visibleMaxLen && loopEndX >= scrollPos.x - 2f && loopEndX <= scrollPos.x + viewWidth + 2f)
             {
@@ -305,7 +317,6 @@ public class VRC_ExpressionTimeline : EditorWindow
                 GUI.DrawTexture(new Rect(loopEndX - 1, areaRect.y + 15, 2, areaRect.height - 15), EditorGUIUtility.whiteTexture);
             }
 
-            // 5. 再生ヘッド（赤い線）
             float playheadX = startX + (editor.currentTime / visibleMaxLen) * timelineWidth;
             if (playheadX >= scrollPos.x - 2f && playheadX <= scrollPos.x + viewWidth + 2f)
             {
@@ -314,14 +325,12 @@ public class VRC_ExpressionTimeline : EditorWindow
             }
             GUI.color = Color.white;
 
-            // 6. ボックス選択中の矩形描画（ドラッグ中）
             if (isBoxSelecting)
             {
                 DrawOutlineRect(boxSelectRect, new Color(0.325f, 0.639f, 0.831f, 0.15f), new Color(0.325f, 0.639f, 0.831f, 0.8f));
             }
         }
 
-        // 7. スライダーの描画
         Rect sliderRect = new Rect(startX - 6, centerY - 10f, timelineWidth + 12, 20);
         EditorGUI.BeginChangeCheck();
         float nt = GUI.HorizontalSlider(sliderRect, editor.currentTime, 0f, visibleMaxLen);
@@ -350,7 +359,7 @@ public class VRC_ExpressionTimeline : EditorWindow
                     if (insideKeyLane)
                     {
                         float clickedTime = -1f;
-                        foreach (float t in mockKeyTimes)
+                        foreach (float t in displayKeyTimes)
                         {
                             float x = startX + (t / visibleMaxLen) * timelineWidth;
                             if (Mathf.Abs(mPos.x - x) <= 8f)
@@ -360,8 +369,6 @@ public class VRC_ExpressionTimeline : EditorWindow
                             }
                         }
 
-                        // ★【選択ボックス内のドラッグ判定】
-                        // すでに選択枠（青い四角）が存在し、その内側をドラッグしようとした場合
                         float clickTimeSnap = GetSnappedTimeAtX(mPos.x, startX, timelineWidth, visibleMaxLen);
                         bool clickedInsideSelectionBox = selectedRangeStart >= 0f &&
                                                          clickTimeSnap >= selectedRangeStart &&
@@ -369,46 +376,44 @@ public class VRC_ExpressionTimeline : EditorWindow
 
                         if (clickedInsideSelectionBox)
                         {
-                            // 選択範囲自体のドラッグ（一括移動）を開始
                             isDraggingRange = true;
                             dragStartMouseX = mPos.x;
                             dragStartRangeStart = selectedRangeStart;
                             dragStartRangeEnd = selectedRangeEnd;
-                            dragStartKeyTimes = new List<float>(selectedMockTimes);
+                            dragStartKeyTimes = new List<float>(selectedKeyTimes);
                             e.Use();
                         }
                         else if (clickedTime >= 0f)
                         {
-                            // 単体またはShift複数選択
                             if (e.shift)
                             {
-                                if (selectedMockTimes.Contains(clickedTime)) selectedMockTimes.Remove(clickedTime);
-                                else selectedMockTimes.Add(clickedTime);
+                                if (selectedKeyTimes.Contains(clickedTime)) selectedKeyTimes.Remove(clickedTime);
+                                else selectedKeyTimes.Add(clickedTime);
                             }
                             else
                             {
-                                if (!selectedMockTimes.Contains(clickedTime))
+                                if (!selectedKeyTimes.Contains(clickedTime))
                                 {
-                                    selectedMockTimes.Clear();
-                                    selectedMockTimes.Add(clickedTime);
+                                    selectedKeyTimes.Clear();
+                                    selectedKeyTimes.Add(clickedTime);
                                 }
                             }
 
-                            // 単体キーのドラッグ開始
-                            isDraggingMock = true;
+                            isDraggingKey = true;
                             dragStartMouseX = mPos.x;
-                            dragStartKeyTimes = new List<float>(selectedMockTimes);
+                            dragStartKeyTimes = new List<float>(selectedKeyTimes);
 
-                            // 単体ドラッグ時も一旦ボックス位置を更新
-                            selectedRangeStart = selectedMockTimes.Min();
-                            selectedRangeEnd = selectedMockTimes.Max();
+                            if (selectedKeyTimes.Count > 0)
+                            {
+                                selectedRangeStart = selectedKeyTimes.Min();
+                                selectedRangeEnd = selectedKeyTimes.Max();
+                            }
 
                             e.Use();
                         }
                         else
                         {
-                            // 何もない場所をクリックした場合は全選択解除し、新規のボックス選択開始
-                            selectedMockTimes.Clear();
+                            selectedKeyTimes.Clear();
                             selectedRangeStart = -1f;
                             selectedRangeEnd = -1f;
 
@@ -422,10 +427,9 @@ public class VRC_ExpressionTimeline : EditorWindow
                     }
                     else
                     {
-                        // キーレーン外をクリックした場合は全選択解除
-                        if (selectedMockTimes.Count > 0)
+                        if (selectedKeyTimes.Count > 0)
                         {
-                            selectedMockTimes.Clear();
+                            selectedKeyTimes.Clear();
                             selectedRangeStart = -1f;
                             selectedRangeEnd = -1f;
                             Repaint();
@@ -439,15 +443,12 @@ public class VRC_ExpressionTimeline : EditorWindow
                 {
                     if (isDraggingRange)
                     {
-                        // ★【新規：選択範囲ボックスの一括移動】
                         float deltaX = mPos.x - dragStartMouseX;
-                        float deltaTime = Mathf.Round((deltaX / timelineWidth) * visibleMaxLen * 60f) / 60f; // 1Fスナップ
+                        float deltaTime = Mathf.Round((deltaX / timelineWidth) * visibleMaxLen * 60f) / 60f;
 
-                        // 選択範囲自体の時間を移動（スライド）
                         selectedRangeStart = Mathf.Clamp(dragStartRangeStart + deltaTime, 0f, visibleMaxLen);
                         selectedRangeEnd = Mathf.Clamp(dragStartRangeEnd + deltaTime, 0f, visibleMaxLen);
 
-                        // 選択されているすべてのキーの時間を一括移動
                         List<float> newTimes = new List<float>();
                         for (int i = 0; i < dragStartKeyTimes.Count; i++)
                         {
@@ -455,19 +456,21 @@ public class VRC_ExpressionTimeline : EditorWindow
                             newTimes.Add(newTime);
                         }
 
-                        for (int i = 0; i < selectedMockTimes.Count; i++)
+                        // エラー修正箇所：実データから描画情報を再構築することで安全に更新
+                        displayKeyTimes = new List<float>(cachedKeyframeTimes);
+                        selectedKeyTimes.Clear();
+                        for (int i = 0; i < dragStartKeyTimes.Count; i++)
                         {
-                            float oldTime = selectedMockTimes[i];
-                            int index = mockKeyTimes.IndexOf(oldTime);
-                            if (index >= 0) mockKeyTimes[index] = newTimes[i];
-                            selectedMockTimes[i] = newTimes[i];
+                            displayKeyTimes.Remove(dragStartKeyTimes[i]);
+                            displayKeyTimes.Add(newTimes[i]);
+                            selectedKeyTimes.Add(newTimes[i]);
                         }
+
                         e.Use();
                         Repaint();
                     }
-                    else if (isDraggingMock)
+                    else if (isDraggingKey)
                     {
-                        // 単体キーのドラッグ
                         float deltaX = mPos.x - dragStartMouseX;
                         float deltaTime = (deltaX / timelineWidth) * visibleMaxLen;
 
@@ -480,23 +483,27 @@ public class VRC_ExpressionTimeline : EditorWindow
                             newTimes.Add(newTime);
                         }
 
-                        for (int i = 0; i < selectedMockTimes.Count; i++)
+                        // エラー修正箇所：実データから描画情報を再構築することで安全に更新
+                        displayKeyTimes = new List<float>(cachedKeyframeTimes);
+                        selectedKeyTimes.Clear();
+                        for (int i = 0; i < dragStartKeyTimes.Count; i++)
                         {
-                            float oldTime = selectedMockTimes[i];
-                            int index = mockKeyTimes.IndexOf(oldTime);
-                            if (index >= 0) mockKeyTimes[index] = newTimes[i];
-                            selectedMockTimes[i] = newTimes[i];
+                            displayKeyTimes.Remove(dragStartKeyTimes[i]);
+                            displayKeyTimes.Add(newTimes[i]);
+                            selectedKeyTimes.Add(newTimes[i]);
                         }
 
-                        selectedRangeStart = selectedMockTimes.Min();
-                        selectedRangeEnd = selectedMockTimes.Max();
+                        if (selectedKeyTimes.Count > 0)
+                        {
+                            selectedRangeStart = selectedKeyTimes.Min();
+                            selectedRangeEnd = selectedKeyTimes.Max();
+                        }
 
                         e.Use();
                         Repaint();
                     }
                     else if (isBoxSelecting)
                     {
-                        // ★【新規：選択枠自体の1F単位スナップ伸縮 ＆ レーン上端固定描画】
                         float tStart = GetSnappedTimeAtX(boxSelectStart.x, startX, timelineWidth, visibleMaxLen);
                         float tEnd = GetSnappedTimeAtX(mPos.x, startX, timelineWidth, visibleMaxLen);
 
@@ -516,66 +523,76 @@ public class VRC_ExpressionTimeline : EditorWindow
                     if (isDraggingRange)
                     {
                         isDraggingRange = false;
+                        float deltaX = mPos.x - dragStartMouseX;
+                        float deltaTime = Mathf.Round((deltaX / timelineWidth) * visibleMaxLen * 60f) / 60f;
 
-                        // 重複キーの上書きマージ
-                        mockKeyTimes = mockKeyTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct().ToList();
-                        selectedMockTimes = selectedMockTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct().ToList();
-
-                        // 選択範囲ボックスの再計算
-                        if (selectedMockTimes.Count > 0)
+                        if (!Mathf.Approximately(deltaTime, 0f))
                         {
-                            selectedRangeStart = selectedMockTimes.Min();
-                            selectedRangeEnd = selectedMockTimes.Max();
+                            CommitKeyMove(VRC_ExpressionEditor.Instance, dragStartKeyTimes, deltaTime);
                         }
                         else
                         {
-                            selectedRangeStart = -1f;
-                            selectedRangeEnd = -1f;
+                            displayKeyTimes = displayKeyTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct().ToList();
+                            selectedKeyTimes = new HashSet<float>(selectedKeyTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct());
+                            if (selectedKeyTimes.Count > 0)
+                            {
+                                selectedRangeStart = selectedKeyTimes.Min();
+                                selectedRangeEnd = selectedKeyTimes.Max();
+                            }
+                            else
+                            {
+                                selectedRangeStart = -1f;
+                                selectedRangeEnd = -1f;
+                            }
                         }
-
                         e.Use();
                         Repaint();
                     }
-                    else if (isDraggingMock)
+                    else if (isDraggingKey)
                     {
-                        isDraggingMock = false;
+                        isDraggingKey = false;
+                        float deltaX = mPos.x - dragStartMouseX;
+                        float deltaTime = (deltaX / timelineWidth) * visibleMaxLen;
+                        deltaTime = Mathf.Round(deltaTime * 60f) / 60f;
 
-                        mockKeyTimes = mockKeyTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct().ToList();
-                        selectedMockTimes = selectedMockTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct().ToList();
-
-                        if (selectedMockTimes.Count > 0)
+                        if (!Mathf.Approximately(deltaTime, 0f))
                         {
-                            selectedRangeStart = selectedMockTimes.Min();
-                            selectedRangeEnd = selectedMockTimes.Max();
+                            CommitKeyMove(VRC_ExpressionEditor.Instance, dragStartKeyTimes, deltaTime);
                         }
-
+                        else
+                        {
+                            displayKeyTimes = displayKeyTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct().ToList();
+                            selectedKeyTimes = new HashSet<float>(selectedKeyTimes.Select(t => Mathf.Round(t * 60f) / 60f).Distinct());
+                            if (selectedKeyTimes.Count > 0)
+                            {
+                                selectedRangeStart = selectedKeyTimes.Min();
+                                selectedRangeEnd = selectedKeyTimes.Max();
+                            }
+                        }
                         e.Use();
                         Repaint();
                     }
                     else if (isBoxSelecting)
                     {
                         isBoxSelecting = false;
-
                         float tStart = GetSnappedTimeAtX(boxSelectStart.x, startX, timelineWidth, visibleMaxLen);
                         float tEnd = GetSnappedTimeAtX(mPos.x, startX, timelineWidth, visibleMaxLen);
 
                         float selStart = Mathf.Min(tStart, tEnd);
                         float selEnd = Mathf.Max(tStart, tEnd);
 
-                        // ★【高精度なフレーム判定】時間区間にキーが入っているかをチェック
-                        foreach (float t in mockKeyTimes)
+                        foreach (float t in displayKeyTimes)
                         {
                             if (t >= selStart && t <= selEnd)
                             {
-                                if (!selectedMockTimes.Contains(t)) selectedMockTimes.Add(t);
+                                if (!selectedKeyTimes.Contains(t)) selectedKeyTimes.Add(t);
                             }
                         }
 
-                        // ボックス範囲を確定枠として維持
-                        if (selectedMockTimes.Count > 0)
+                        if (selectedKeyTimes.Count > 0)
                         {
-                            selectedRangeStart = selectedMockTimes.Min();
-                            selectedRangeEnd = selectedMockTimes.Max();
+                            selectedRangeStart = selectedKeyTimes.Min();
+                            selectedRangeEnd = selectedKeyTimes.Max();
                         }
                         else
                         {
@@ -589,6 +606,56 @@ public class VRC_ExpressionTimeline : EditorWindow
                 }
                 break;
         }
+    }
+
+    private void CommitKeyMove(VRC_ExpressionEditor editor, List<float> targetTimes, float offset)
+    {
+        if (editor.availableClips.Count <= editor.selectedClipIndex) return;
+        AnimationClip clip = editor.availableClips[editor.selectedClipIndex];
+
+        Undo.RecordObject(clip, "キーフレーム移動");
+
+        foreach (var pathGroup in editor.warehouse.Values)
+        {
+            foreach (var track in pathGroup)
+            {
+                AnimationCurve curve = track.curve;
+                bool changed = false;
+
+                for (int i = curve.keys.Length - 1; i >= 0; i--)
+                {
+                    float time = curve.keys[i].time;
+                    if (targetTimes.Contains(time))
+                    {
+                        Keyframe kf = curve.keys[i];
+                        float newTime = Mathf.Round((time + offset) * 60f) / 60f;
+                        newTime = Mathf.Max(0f, newTime);
+
+                        for (int j = curve.keys.Length - 1; j >= 0; j--)
+                        {
+                            if (Mathf.Approximately(curve.keys[j].time, newTime) && !Mathf.Approximately(time, newTime))
+                            {
+                                curve.RemoveKey(j);
+                            }
+                        }
+
+                        curve.RemoveKey(i);
+                        kf.time = newTime;
+                        curve.AddKey(kf);
+                        changed = true;
+                    }
+                }
+
+                if (changed)
+                {
+                    AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve(track.path, track.type, track.propertyName), curve);
+                }
+            }
+        }
+
+        AssetDatabase.SaveAssets();
+        editor.RefreshExpressionCache();
+        UpdateKeyframeCache(editor);
     }
 
     private void DrawDiamond(float x, float y, float size, Color color, bool fill)
@@ -711,7 +778,6 @@ public class VRC_ExpressionTimeline : EditorWindow
         }
     }
 
-    // 目盛り描画用メソッド（レイアウト復元版）
     private void DrawRulerAndGrid(Rect areaRect, float startX, float timelineWidth, int totalFrames, float maxLen, float viewWidth, float centerY)
     {
         float pixelsPerFrame = timelineWidth / Mathf.Max(totalFrames, 1);
@@ -728,10 +794,7 @@ public class VRC_ExpressionTimeline : EditorWindow
         int endFrame = Mathf.CeilToInt((scrollPos.x + viewWidth) / pixelsPerFrame);
         endFrame = Mathf.Min(totalFrames, endFrame + 1);
 
-        // 主線の高さを定義（元の通り下まで貫通）
         float longLineHeight = areaRect.height - 15f;
-
-        // 副線の高さを主線の80%にし、スライダー(centerY)を中心に十字交差するように設定
         float shortLineHeight = longLineHeight * 0.7f;
         float shortLineY = centerY - (shortLineHeight / 2f);
 
@@ -745,13 +808,11 @@ public class VRC_ExpressionTimeline : EditorWindow
                 Rect labelRect = new Rect(x - 25, areaRect.y + 2f, 50, 15);
                 GUI.Label(labelRect, i.ToString(), rulerLabelStyle);
 
-                // 上下貫通する長い縦線
                 GUI.color = new Color(1f, 1f, 1f, 0.40f);
                 GUI.DrawTexture(new Rect(x, areaRect.y + 15f, 1, longLineHeight), EditorGUIUtility.whiteTexture);
             }
             else if (pixelsPerFrame >= 3.0f)
             {
-                // 副目盛り（50%高さ、スライダーと十字交差）
                 GUI.color = new Color(1f, 1f, 1f, 0.25f);
                 GUI.DrawTexture(new Rect(x, shortLineY, 1, shortLineHeight), EditorGUIUtility.whiteTexture);
             }
